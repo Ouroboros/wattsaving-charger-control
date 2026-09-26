@@ -5,11 +5,26 @@
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
   // src/protocol.ts
+  function nextMidnight(now = /* @__PURE__ */ new Date()) {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  }
+  function parseLocalMinute(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+    if (!match) throw new Error("\u9884\u7EA6\u65F6\u95F4\u683C\u5F0F\u65E0\u6548");
+    const [year, month, day, hour, minute] = match.slice(1).map(Number);
+    const date = new Date(year, month - 1, day, hour, minute);
+    if (date.getFullYear() !== year || date.getMonth() + 1 !== month || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) {
+      throw new Error("\u9884\u7EA6\u65F6\u95F4\u4E0D\u662F\u6709\u6548\u7684\u672C\u5730\u65F6\u95F4");
+    }
+    return date;
+  }
   var commands = {
     1: { start: "80116000000000000062", stop: "80126000000000000063", unlock: "80166000000000000067" },
     2: { start: "@%PD-102-0-181-@", stop: "@%PD-104-0-181-@", unlock: "@%PD-108-0-181-@" }
   };
   var numeric = (value) => /^\d+$/.test(value ?? "");
+  var pad = (value) => String(value).padStart(2, "0");
+  var calendar = (date) => [String(date.getFullYear()), pad(date.getMonth() + 1), pad(date.getDate()), pad(date.getHours()), pad(date.getMinutes())];
   function checksum(body) {
     if (body.length !== 19 || !numeric(body)) throw new Error("\u65E7\u7248\u5E27\u4E3B\u4F53\u987B\u4E3A 19 \u4F4D\u6570\u5B57");
     return String([...body].reduce((sum, digit) => sum + Number(digit), 0) % 10);
@@ -25,9 +40,39 @@
     return commands[protocol][action];
   }
   function syncClock(protocol, date = /* @__PURE__ */ new Date()) {
-    const pad = (value) => String(value).padStart(2, "0");
-    const parts = [String(date.getFullYear()), pad(date.getMonth() + 1), pad(date.getDate()), pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds())];
+    const parts = [...calendar(date), pad(date.getSeconds())];
     return protocol === 1 ? appendChecksum(`821${parts.join("")}06`) : `@%PD-204-0-181-${parts.join("-")}-@`;
+  }
+  function validateReservation(reservation, now = /* @__PURE__ */ new Date()) {
+    const start = reservation.start;
+    if (!(start instanceof Date) || !Number.isFinite(start.getTime()) || !Number.isFinite(now.getTime()) || start.getFullYear() < 1e3 || start.getFullYear() > 9999 || start.getSeconds() || start.getMilliseconds()) {
+      throw new Error("\u9884\u7EA6\u5F00\u59CB\u65F6\u95F4\u65E0\u6548\uFF0C\u987B\u7CBE\u786E\u5230\u5206\u949F");
+    }
+    const offset = start.getTime() - now.getTime();
+    if (offset <= 0 || offset > 24 * 60 * 60 * 1e3) throw new Error("\u9884\u7EA6\u5F00\u59CB\u65F6\u95F4\u987B\u5728\u672A\u6765 24 \u5C0F\u65F6\u5185");
+    if (reservation.end.kind === "time" && (!Number.isInteger(reservation.end.minutes) || reservation.end.minutes < 60 || reservation.end.minutes > 720 || reservation.end.minutes % 60 !== 0)) {
+      throw new Error("\u9884\u7EA6\u65F6\u957F\u4EC5\u652F\u6301 1 \u81F3 12 \u5C0F\u65F6\uFF08\u6574\u5C0F\u65F6\uFF09");
+    }
+    if (reservation.end.kind === "energy" && (!Number.isInteger(reservation.end.kWh) || reservation.end.kWh < 5 || reservation.end.kWh > 99 || reservation.end.kWh % 5 !== 0 && reservation.end.kWh !== 99)) {
+      throw new Error("\u9884\u7EA6\u7535\u91CF\u4EC5\u652F\u6301 5 \u81F3 95 \u5EA6\uFF08\u6BCF\u6863 5 \u5EA6\uFF09\u6216 99 \u5EA6");
+    }
+    if (!["full", "time", "energy"].includes(reservation.end.kind)) throw new Error("\u672A\u77E5\u7684\u5145\u7535\u7ED3\u675F\u65B9\u5F0F");
+  }
+  function reservationCommand(protocol, action, reservation, now = /* @__PURE__ */ new Date()) {
+    if (action === "cancel") {
+      if (reservation) throw new Error("\u53D6\u6D88\u9884\u7EA6\u4E0D\u5F97\u643A\u5E26\u65B0\u7684\u9884\u7EA6\u6761\u4EF6");
+      return protocol === 1 ? "80176000000000000068" : "@%PD-116-0-181-@";
+    }
+    if (action !== "submit" || !reservation) throw new Error("\u63D0\u4EA4\u9884\u7EA6\u987B\u63D0\u4F9B\u5F00\u59CB\u65F6\u95F4\u4E0E\u7ED3\u675F\u6761\u4EF6");
+    validateReservation(reservation, now);
+    const start = calendar(reservation.start);
+    const clock = [...calendar(now), pad(now.getSeconds())];
+    const end = reservation.end;
+    const pattern = end.kind === "full" ? "3" : end.kind === "time" ? "1" : "2";
+    const minutes = end.kind === "time" ? String(end.minutes).padStart(3, "0") : "000";
+    const energy = end.kind === "energy" ? String(end.kWh).padStart(4, "0") : "0000";
+    if (protocol === 1) return appendChecksum(`811${clock.join("")}06`) + appendChecksum(`812${start.join("")}0006`) + appendChecksum(`813${pattern}${minutes}${energy}10000006`);
+    return `@%PD-114-0-181-${clock.join("-")}-${start.join("-")}-00-${pattern}-${minutes}-${energy}-100-@`;
   }
   function status(protocol, fields) {
     if (fields.length < 13 || !fields.slice(0, 3).every(numeric) || ![fields[3], fields[5], fields[10]].every(numeric)) return null;
@@ -55,6 +100,7 @@
     const code = parts[1];
     if (code === "101") return { type: "auth", protocol: 2, ok: parts[4] === "1", code: parts[4] ?? "" };
     if (code === "103" || code === "105") return { type: "ack", protocol: 2, action: code === "103" ? "start" : "stop", ok: parts[4] === "1", code: parts[4] ?? "" };
+    if ((code === "115" || code === "117") && (parts[4] === "0" || parts[4] === "1")) return { type: "reservation", protocol: 2, action: code === "115" ? "submit" : "cancel", ok: parts[4] === "1", code: parts[4] };
     if (code === "107") return status(2, parts.slice(4, 17));
     return { type: "unknown", protocol: 2, code: code ?? "" };
   }
@@ -66,6 +112,11 @@
     if (header === "88" && first[1] + second[1] === "88" && trailer === "11") {
       const code = first[4] + second[4];
       return { type: "auth", protocol: 1, ok: code === "33", code };
+    }
+    if (header === "88" && first[1] + second[1] === "88" && trailer === "66") {
+      const kind = first[3] + second[3], code = first[5] + second[5];
+      if (kind === "22" && ["55", "66"].includes(code)) return { type: "reservation", protocol: 1, action: "submit", ok: code === "55", code };
+      if (kind === "33" && ["77", "88"].includes(code)) return { type: "reservation", protocol: 1, action: "cancel", ok: code === "77", code };
     }
     if (!["88", "77", "66"].includes(header) || trailer !== "66" || first[2] !== "1" || second[2] !== "2") return null;
     return status(1, [frame.slice(8, 11), frame.slice(11, 15), frame.slice(15, 18), frame[27], frame.slice(4, 7), frame[3], frame[23], frame.slice(28, 32), frame.slice(35, 38), frame.slice(32, 35), frame[24], frame[26], frame[25]]);
@@ -143,6 +194,8 @@
       __publicField(this, "latestAt", 0);
       __publicField(this, "pendingAuth", null);
       __publicField(this, "pendingControl", null);
+      __publicField(this, "pendingReservation", null);
+      __publicField(this, "reservationAccepted", null);
       __publicField(this, "fallbackVault", { lastId: "", devices: {} });
       __publicField(this, "onDisconnected", () => {
         this.diagnose("unexpected-disconnect", {}, "warn");
@@ -165,6 +218,12 @@
     }
     get authorized() {
       return this.phase === "ready" && !!this.server?.connected;
+    }
+    get reservationPending() {
+      return !!this.pendingReservation;
+    }
+    get canCancelReservation() {
+      return this.reservationAccepted === null ? this.latest?.mode === "3" : this.reservationAccepted;
     }
     get rememberedName() {
       const saved = this.loadVault();
@@ -344,12 +403,13 @@
     }
     async refresh() {
       if (!this.authorized || !this.protocol) throw new Error("\u8BF7\u5148\u901A\u8FC7\u8BBE\u5907\u6388\u6743");
+      if (this.pendingReservation) throw new Error("\u6B63\u5728\u7B49\u5F85\u9884\u7EA6\u56DE\u6267\uFF0C\u8BF7\u52FF\u540C\u65F6\u53D1\u9001\u540C\u6B65\u6307\u4EE4");
       await this.write(syncClock(this.protocol), "clock-sync");
       this.emit({ type: "notice", message: "\u5DF2\u53D1\u9001\u8BBE\u5907\u65F6\u949F\u540C\u6B65\u5E27\uFF0C\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002" });
     }
     control(action) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
-      if (this.pendingControl) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingControl || this.pendingReservation) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const s = this.latest;
       if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("\u8BBE\u5907\u5F53\u524D\u4E0D\u6EE1\u8DB3\u542F\u52A8\u6761\u4EF6\uFF1A\u9700\u5C31\u7EEA\u3001\u63D2\u67AA\u3001\u65E0\u9884\u7EA6\u6216\u5373\u63D2\u5373\u5145\u51B2\u7A81");
       if (action === "stop" && s.state !== "4") throw new Error("\u53EA\u6709\u5145\u7535\u4E2D\u624D\u80FD\u505C\u6B62");
@@ -361,6 +421,36 @@
         this.pendingControl = { action, resolve, reject, timer };
         void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
       });
+    }
+    submitReservation(reservation) {
+      return this.reserve("submit", reservation);
+    }
+    cancelReservation() {
+      return this.reserve("cancel");
+    }
+    reserve(action, reservation) {
+      if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
+      if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      const status2 = this.latest;
+      if (action === "submit" && (status2.state !== "2" || status2.gunFlag === "1" || status2.lock === "0" || status2.selfStartFlag === "2" || status2.mode === "5")) {
+        throw new Error("\u9884\u7EA6\u9700\u8981\u8BBE\u5907\u5C31\u7EEA\u3001\u5DF2\u63D2\u67AA\u4E0A\u9501\uFF0C\u4E14\u672A\u542F\u7528\u5373\u63D2\u5373\u5145\u6216\u65E0\u611F\u5145\u7535");
+      }
+      if (action === "cancel" && (status2.state === "4" || !this.canCancelReservation)) throw new Error("\u672A\u786E\u8BA4\u8BBE\u5907\u5904\u4E8E\u53EF\u53D6\u6D88\u7684\u9884\u7EA6\u72B6\u6001\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
+      const frame = reservationCommand(this.protocol, action, reservation);
+      this.diagnose("reservation-request", { action, end: reservation?.end.kind ?? "none", state: status2.state });
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => this.rejectReservation(new Error("\u672A\u6536\u5230\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u5B9E\u9645\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5")), 1e4);
+        this.pendingReservation = { action, resolve, reject, timer };
+        void this.write(frame, `reservation-${action}`).catch((error) => this.rejectReservation(new Error(`\u53D1\u9001\u9884\u7EA6\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
+      });
+    }
+    rejectReservation(error) {
+      if (!this.pendingReservation) return;
+      const pending = this.pendingReservation;
+      this.pendingReservation = null;
+      clearTimeout(pending.timer);
+      this.diagnose("reservation-unconfirmed", { action: pending.action }, "warn");
+      pending.reject(error);
     }
     rejectControl(error) {
       if (!this.pendingControl) return;
@@ -409,7 +499,23 @@
         void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}` }));
         return;
       }
+      if (frame.type === "reservation") {
+        this.diagnose("reservation-reply", { action: frame.action, accepted: frame.ok });
+        const pending = this.pendingReservation;
+        if (!pending || pending.action !== frame.action) return;
+        this.pendingReservation = null;
+        clearTimeout(pending.timer);
+        if (!frame.ok) {
+          pending.reject(new Error("\u8BBE\u5907\u62D2\u7EDD\u9884\u7EA6\u64CD\u4F5C"));
+          return;
+        }
+        this.reservationAccepted = frame.action === "submit";
+        this.emit({ type: "reservation", action: frame.action, message: frame.action === "submit" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u9884\u7EA6\u63D0\u4EA4\u3002" : "\u8BBE\u5907\u5DF2\u786E\u8BA4\u53D6\u6D88\u9884\u7EA6\u3002" });
+        pending.resolve();
+        return;
+      }
       if (frame.type === "status" && this.authorized) {
+        if (this.reservationAccepted === false && frame.mode === "3") this.reservationAccepted = null;
         this.diagnose("status", { state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock });
         this.latest = frame;
         this.latestAt = Date.now();
@@ -446,6 +552,7 @@
       this.sniffTimer = null;
       this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"));
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
+      this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
       const server = this.server;
       if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
       this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
@@ -461,6 +568,7 @@
       this.latest = null;
       this.latestAt = 0;
       this.autoLoginTried = false;
+      this.reservationAccepted = null;
       this.decoder.reset();
       this.setPhase("offline", "\u672A\u8FDE\u63A5\u5145\u7535\u6869");
     }
@@ -577,7 +685,34 @@
   var phase = "offline";
   var busy = false;
   var statusAt = 0;
+  var reservationResult = "";
+  var reservationStartAutomatic = true;
   var recentMessages = [];
+  var pad2 = (value) => String(value).padStart(2, "0");
+  function localMinute(date) {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  }
+  function resetReservationStart() {
+    reservationStartAutomatic = true;
+    const input = el("reserveStart");
+    input.defaultValue = localMinute(nextMidnight());
+    input.value = input.defaultValue;
+  }
+  function selectedReservation() {
+    const start = parseLocalMinute(el("reserveStart").value);
+    const kind = el("reserveEnd").value;
+    let end;
+    if (kind === "full") end = { kind: "full" };
+    else if (kind === "time") end = { kind: "time", minutes: Number(el("reserveHours").value) * 60 };
+    else if (kind === "energy") end = { kind: "energy", kWh: Number(el("reserveEnergy").value) };
+    else throw new Error("\u672A\u77E5\u7684\u9884\u7EA6\u7ED3\u675F\u65B9\u5F0F");
+    const reservation = { start, end };
+    validateReservation(reservation);
+    return reservation;
+  }
+  function endLabel(end) {
+    return end.kind === "full" ? "\u81EA\u52A8\u5145\u6EE1" : end.kind === "time" ? `\u5145\u7535 ${end.minutes / 60} \u5C0F\u65F6` : `\u5145\u7535 ${end.kWh} \u5EA6`;
+  }
   function environment() {
     const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" : ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
     return { secureContext: window.isSecureContext, webBluetooth: !!adapter, getDevices: !!adapter?.getDevices, scheme };
@@ -613,10 +748,15 @@
   function handleEvent(event) {
     if (event.type === "phase") {
       phase = event.phase;
+      if (phase === "offline" || phase === "connecting") reservationResult = "";
       diagnostics.add("phase", { phase });
       record(event.message);
     }
     if (event.type === "notice") record(event.message);
+    if (event.type === "reservation") {
+      reservationResult = event.message;
+      record(event.message);
+    }
     if (event.type === "protocol") record(`\u534F\u8BAE\uFF1A${event.version === 1 ? "\u65E7\u7248" : "\u65B0\u7248"}\uFF08${event.source}\uFF09`);
     if (event.type === "auth-needed") record(event.message);
     if (event.type === "status") {
@@ -651,6 +791,15 @@
     el("liveDisconnect").disabled = !device;
     el("liveChoose").disabled = !supported || busy;
     el("liveForgetPassword").disabled = !client?.rememberedName;
+    const reservable = !!client?.authorized && fresh && !!status2 && status2.state === "2" && status2.gunFlag !== "1" && status2.lock !== "0" && status2.selfStartFlag !== "2" && status2.mode !== "5";
+    el("reserveSubmit").disabled = !reservable || busy || !!client?.reservationPending;
+    text("reserveSubmit", client?.canCancelReservation ? "\u4FEE\u6539\u9884\u7EA6" : "\u63D0\u4EA4\u9884\u7EA6");
+    el("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status2?.state === "4" || !client?.canCancelReservation;
+    const reserveInput = el("reserveStart");
+    if (reservationStartAutomatic && reserveInput.value !== localMinute(nextMidnight())) resetReservationStart();
+    reserveInput.min = localMinute(/* @__PURE__ */ new Date());
+    reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1e3));
+    text("reserveState", !client?.authorized ? "\u8FDE\u63A5\u5E76\u6388\u6743\u540E\u53EF\u9884\u7EA6\u3002" : client.reservationPending ? "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0C\u7B49\u5F85\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u6B64\u65F6\u52FF\u91CD\u590D\u63D0\u4EA4\u3002" : reservationResult || !fresh ? reservationResult || "\u7B49\u5F85\u6700\u65B0\u8BBE\u5907\u72B6\u6001\uFF0C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002" : status2?.mode === "3" ? "\u8BBE\u5907\u901A\u77E5\u663E\u793A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u4FEE\u6539\u6216\u53D6\u6D88\u3002" : client.canCancelReservation ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u63D0\u4EA4\uFF0C\u5C1A\u5F85\u65B0\u7684\u9884\u7EA6\u6A21\u5F0F\u72B6\u6001\u901A\u77E5\u3002" : "\u8BBE\u5907\u672A\u62A5\u544A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u8BBE\u7F6E\u65B0\u7684\u9884\u7EA6\u3002");
   }
   function selectedProtocol() {
     const value = el("liveProtocol").value;
@@ -708,6 +857,55 @@
   for (const [id, action] of [["liveStart", "start"], ["liveStop", "stop"], ["liveUnlock", "unlock"]]) {
     el(id).addEventListener("click", () => void control(action));
   }
+  el("reserveStart").addEventListener("input", () => {
+    reservationStartAutomatic = false;
+  });
+  el("reserveTomorrow").addEventListener("click", () => {
+    resetReservationStart();
+    record("\u9884\u7EA6\u5F00\u59CB\u5DF2\u8BBE\u4E3A\u6B21\u65E5 00:00\uFF1B\u5C1A\u672A\u53D1\u9001\u3002");
+  });
+  el("reserveEnd").addEventListener("change", () => {
+    const kind = el("reserveEnd").value;
+    el("reserveTimeBox").hidden = kind !== "time";
+    el("reserveEnergyBox").hidden = kind !== "energy";
+  });
+  async function reserve(action) {
+    if (!client) return;
+    let reservation;
+    if (action === "submit") {
+      try {
+        reservation = selectedReservation();
+      } catch (error) {
+        reservationResult = errorMessage(error);
+        record(reservationResult);
+        render();
+        return;
+      }
+    }
+    const label = action === "submit" ? "\u63D0\u4EA4\u9884\u7EA6" : "\u53D6\u6D88\u9884\u7EA6";
+    const detail = reservation ? `
+\u5F00\u59CB\uFF1A${localMinute(reservation.start).replace("T", " ")}\uFF08iPhone \u672C\u5730\u65F6\u95F4\uFF09
+\u7ED3\u675F\uFF1A${endLabel(reservation.end)}` : "";
+    if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u6869${label}\uFF1F${detail}
+\u4EC5\u6536\u5230\u8BBE\u5907\u5339\u914D\u56DE\u6267\u540E\u624D\u663E\u793A\u6210\u529F\u3002`)) return;
+    busy = true;
+    reservationResult = `\u6B63\u5728${label}\uFF0C\u7B49\u5F85\u8BBE\u5907\u56DE\u6267\u2026`;
+    render();
+    try {
+      if (action === "submit") await client.submitReservation(reservation);
+      else await client.cancelReservation();
+      reservationResult = `\u8BBE\u5907\u5DF2\u786E\u8BA4${label}\uFF1B\u8BF7\u6838\u5BF9\u8BBE\u5907\u5F53\u524D\u9884\u7EA6\u72B6\u6001\u3002`;
+      record(reservationResult);
+    } catch (error) {
+      reservationResult = `${label}\u672A\u786E\u8BA4\uFF1A${errorMessage(error)}`;
+      failure(label, error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+  el("reserveSubmit").addEventListener("click", () => void reserve("submit"));
+  el("reserveCancel").addEventListener("click", () => void reserve("cancel"));
   el("liveDisconnect").addEventListener("click", () => {
     client?.disconnect();
     statusAt = 0;
@@ -763,6 +961,7 @@
     refreshDiagnostics(true);
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
+  resetReservationStart();
   diagnostics.add("app-start", { ...environment() });
   refreshDiagnostics(true);
   render();

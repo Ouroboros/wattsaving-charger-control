@@ -1,6 +1,6 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
 import { Diagnostics, type DiagnosticEnvironment } from "./diagnostics";
-import type { ControlAction, DeviceStatus, Version } from "./protocol";
+import { nextMidnight, parseLocalMinute, validateReservation, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -17,7 +17,34 @@ const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.is
 let phase = "offline";
 let busy = false;
 let statusAt = 0;
+let reservationResult = "";
+let reservationStartAutomatic = true;
 const recentMessages: string[] = [];
+const pad = (value: number): string => String(value).padStart(2, "0");
+function localMinute(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function resetReservationStart(): void {
+  reservationStartAutomatic = true;
+  const input = el<HTMLInputElement>("reserveStart");
+  input.defaultValue = localMinute(nextMidnight());
+  input.value = input.defaultValue;
+}
+function selectedReservation(): Reservation {
+  const start = parseLocalMinute(el<HTMLInputElement>("reserveStart").value);
+  const kind = el<HTMLSelectElement>("reserveEnd").value;
+  let end: ReservationEnd;
+  if (kind === "full") end = { kind: "full" };
+  else if (kind === "time") end = { kind: "time", minutes: Number(el<HTMLSelectElement>("reserveHours").value) * 60 };
+  else if (kind === "energy") end = { kind: "energy", kWh: Number(el<HTMLSelectElement>("reserveEnergy").value) };
+  else throw new Error("未知的预约结束方式");
+  const reservation = { start, end };
+  validateReservation(reservation);
+  return reservation;
+}
+function endLabel(end: ReservationEnd): string {
+  return end.kind === "full" ? "自动充满" : end.kind === "time" ? `充电 ${end.minutes / 60} 小时` : `充电 ${end.kWh} 度`;
+}
 function environment(): DiagnosticEnvironment {
   const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" :
     ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
@@ -49,8 +76,13 @@ function failure(action: string, error: unknown): void {
   record(`${action}失败：${errorMessage(error)}`);
 }
 function handleEvent(event: ChargerEvent): void {
-  if (event.type === "phase") { phase = event.phase; diagnostics.add("phase", { phase }); record(event.message); }
+  if (event.type === "phase") {
+    phase = event.phase;
+    if (phase === "offline" || phase === "connecting") reservationResult = "";
+    diagnostics.add("phase", { phase }); record(event.message);
+  }
   if (event.type === "notice") record(event.message);
+  if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") { statusAt = Date.now(); record("收到设备状态通知。"); }
@@ -84,6 +116,17 @@ function render(): void {
   el<HTMLButtonElement>("liveDisconnect").disabled = !device;
   el<HTMLButtonElement>("liveChoose").disabled = !supported || busy;
   el<HTMLButtonElement>("liveForgetPassword").disabled = !client?.rememberedName;
+  const reservable = !!client?.authorized && fresh && !!status && status.state === "2" && status.gunFlag !== "1" && status.lock !== "0" && status.selfStartFlag !== "2" && status.mode !== "5";
+  el<HTMLButtonElement>("reserveSubmit").disabled = !reservable || busy || !!client?.reservationPending;
+  text("reserveSubmit", client?.canCancelReservation ? "修改预约" : "提交预约");
+  el<HTMLButtonElement>("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status?.state === "4" || !client?.canCancelReservation;
+  const reserveInput = el<HTMLInputElement>("reserveStart");
+  if (reservationStartAutomatic && reserveInput.value !== localMinute(nextMidnight())) resetReservationStart();
+  reserveInput.min = localMinute(new Date());
+  reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1000));
+  text("reserveState", !client?.authorized ? "连接并授权后可预约。" : client.reservationPending ? "指令已发送，等待设备预约回执；此时勿重复提交。" :
+    reservationResult || !fresh ? reservationResult || "等待最新设备状态，操作暂不可用。" : status?.mode === "3" ? "设备通知显示预约模式；可修改或取消。" :
+    client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
 }
 function selectedProtocol(): Version | undefined {
   const value = el<HTMLSelectElement>("liveProtocol").value;
@@ -125,6 +168,36 @@ async function control(action: ControlAction): Promise<void> {
 for (const [id, action] of [["liveStart", "start"], ["liveStop", "stop"], ["liveUnlock", "unlock"]] as const) {
   el(id).addEventListener("click", () => void control(action));
 }
+el("reserveStart").addEventListener("input", () => { reservationStartAutomatic = false; });
+el("reserveTomorrow").addEventListener("click", () => { resetReservationStart(); record("预约开始已设为次日 00:00；尚未发送。"); });
+el("reserveEnd").addEventListener("change", () => {
+  const kind = el<HTMLSelectElement>("reserveEnd").value;
+  el("reserveTimeBox").hidden = kind !== "time";
+  el("reserveEnergyBox").hidden = kind !== "energy";
+});
+async function reserve(action: "submit" | "cancel"): Promise<void> {
+  if (!client) return;
+  let reservation: Reservation | undefined;
+  if (action === "submit") {
+    try { reservation = selectedReservation(); }
+    catch (error) { reservationResult = errorMessage(error); record(reservationResult); render(); return; }
+  }
+  const label = action === "submit" ? "提交预约" : "取消预约";
+  const detail = reservation ? `\n开始：${localMinute(reservation.start).replace("T", " ")}（iPhone 本地时间）\n结束：${endLabel(reservation.end)}` : "";
+  if (!window.confirm(`确定向真实充电桩${label}？${detail}\n仅收到设备匹配回执后才显示成功。`)) return;
+  busy = true; reservationResult = `正在${label}，等待设备回执…`; render();
+  try {
+    if (action === "submit") await client.submitReservation(reservation!);
+    else await client.cancelReservation();
+    reservationResult = `设备已确认${label}；请核对设备当前预约状态。`;
+    record(reservationResult);
+  } catch (error) {
+    reservationResult = `${label}未确认：${errorMessage(error)}`;
+    failure(label, error);
+  } finally { busy = false; render(); }
+}
+el("reserveSubmit").addEventListener("click", () => void reserve("submit"));
+el("reserveCancel").addEventListener("click", () => void reserve("cancel"));
 el("liveDisconnect").addEventListener("click", () => { client?.disconnect(); statusAt = 0; render(); });
 el("liveForgetPassword").addEventListener("click", () => {
   if (!window.confirm("删除本网站保存的蓝牙验证码？下次需重新输入。")) return;
@@ -163,6 +236,7 @@ el("clearDiagnostics").addEventListener("click", () => {
   refreshDiagnostics(true);
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
+resetReservationStart();
 diagnostics.add("app-start", { ...environment() });
 refreshDiagnostics(true);
 render();

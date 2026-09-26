@@ -1,4 +1,4 @@
-import { command, FrameDecoder, syncClock, type ControlAction, type DeviceStatus, type Frame, type Version } from "./protocol";
+import { command, FrameDecoder, reservationCommand, syncClock, type ControlAction, type DeviceStatus, type Frame, type Reservation, type ReservationAction, type Version } from "./protocol";
 import type { DiagnosticLevel, DiagnosticValue } from "./diagnostics";
 
 // Web Bluetooth 在部分 TypeScript DOM 版本中没有类型定义；只声明本项目使用到的 API。
@@ -31,6 +31,7 @@ export type ChargerEvent =
   | { type: "notice"; message: string }
   | { type: "protocol"; version: Version; source: string }
   | { type: "status"; status: DeviceStatus }
+  | { type: "reservation"; action: ReservationAction; message: string }
   | { type: "auth-needed"; message: string };
 const KEY = "wattsaving-ble-devices-v1";
 const UUID = (short: string): string => `0000${short}-0000-1000-8000-00805f9b34fb`;
@@ -68,6 +69,8 @@ export class ChargerClient {
   private latestAt = 0;
   private pendingAuth: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password: string; remember: boolean } | null = null;
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingReservation: { action: ReservationAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private reservationAccepted: boolean | null = null;
   private fallbackVault: Vault = { lastId: "", devices: {} };
 
   constructor(
@@ -80,6 +83,8 @@ export class ChargerClient {
   get currentProtocol(): Version | null { return this.protocol; }
   get currentStatus(): DeviceStatus | null { return this.latest; }
   get authorized(): boolean { return this.phase === "ready" && !!this.server?.connected; }
+  get reservationPending(): boolean { return !!this.pendingReservation; }
+  get canCancelReservation(): boolean { return this.reservationAccepted === null ? this.latest?.mode === "3" : this.reservationAccepted; }
   get rememberedName(): string | null {
     const saved = this.loadVault();
     return saved.devices[saved.lastId]?.name ?? null;
@@ -235,13 +240,14 @@ export class ChargerClient {
   }
   async refresh(): Promise<void> {
     if (!this.authorized || !this.protocol) throw new Error("请先通过设备授权");
+    if (this.pendingReservation) throw new Error("正在等待预约回执，请勿同时发送同步指令");
     // 旧应用使用同步设备时钟的帧触发状态更新；它不是无副作用的读取操作。
     await this.write(syncClock(this.protocol), "clock-sync");
     this.emit({ type: "notice", message: "已发送设备时钟同步帧，等待状态通知。" });
   }
   control(action: ControlAction): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation) throw new Error("上一条指令尚未确认");
     const s = this.latest;
     if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("设备当前不满足启动条件：需就绪、插枪、无预约或即插即充冲突");
     if (action === "stop" && s.state !== "4") throw new Error("只有充电中才能停止");
@@ -253,6 +259,31 @@ export class ChargerClient {
       this.pendingControl = { action, resolve, reject, timer };
       void this.write(frame, action).catch(error => this.rejectControl(new Error(`发送指令失败：${message(error)}`)));
     });
+  }
+  submitReservation(reservation: Reservation): Promise<void> { return this.reserve("submit", reservation); }
+  cancelReservation(): Promise<void> { return this.reserve("cancel"); }
+  private reserve(action: ReservationAction, reservation?: Reservation): Promise<void> {
+    if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
+    if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("上一条指令尚未确认");
+    const status = this.latest;
+    if (action === "submit" && (status.state !== "2" || status.gunFlag === "1" || status.lock === "0" || status.selfStartFlag === "2" || status.mode === "5")) {
+      throw new Error("预约需要设备就绪、已插枪上锁，且未启用即插即充或无感充电");
+    }
+    if (action === "cancel" && (status.state === "4" || !this.canCancelReservation)) throw new Error("未确认设备处于可取消的预约状态；请先刷新状态");
+    const frame = reservationCommand(this.protocol, action, reservation);
+    this.diagnose("reservation-request", { action, end: reservation?.end.kind ?? "none", state: status.state });
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => this.rejectReservation(new Error("未收到设备预约回执；实际结果未知，请刷新核对，勿直接重试")), 10000);
+      this.pendingReservation = { action, resolve, reject, timer };
+      void this.write(frame, `reservation-${action}`).catch(error => this.rejectReservation(new Error(`发送预约指令失败：${message(error)}`)));
+    });
+  }
+  private rejectReservation(error: Error): void {
+    if (!this.pendingReservation) return;
+    const pending = this.pendingReservation;
+    this.pendingReservation = null; clearTimeout(pending.timer);
+    this.diagnose("reservation-unconfirmed", { action: pending.action }, "warn");
+    pending.reject(error);
   }
   private rejectControl(error: Error): void {
     if (!this.pendingControl) return;
@@ -292,7 +323,19 @@ export class ChargerClient {
       void this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}` }));
       return;
     }
+    if (frame.type === "reservation") {
+      this.diagnose("reservation-reply", { action: frame.action, accepted: frame.ok });
+      const pending = this.pendingReservation;
+      if (!pending || pending.action !== frame.action) return;
+      this.pendingReservation = null; clearTimeout(pending.timer);
+      if (!frame.ok) { pending.reject(new Error("设备拒绝预约操作")); return; }
+      this.reservationAccepted = frame.action === "submit";
+      this.emit({ type: "reservation", action: frame.action, message: frame.action === "submit" ? "设备已确认预约提交。" : "设备已确认取消预约。" });
+      pending.resolve();
+      return;
+    }
     if (frame.type === "status" && this.authorized) {
+      if (this.reservationAccepted === false && frame.mode === "3") this.reservationAccepted = null;
       this.diagnose("status", { state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock });
       this.latest = frame; this.latestAt = Date.now();
       this.emit({ type: "status", status: frame });
@@ -305,7 +348,7 @@ export class ChargerClient {
       else this.emit({ type: "notice", message: "设备已接收操作，等待状态变化再确认完成。" });
     }
   }
-  private async write(text: string, action: "auth" | "clock-sync" | ControlAction): Promise<void> {
+  private async write(text: string, action: "auth" | "clock-sync" | ControlAction | "reservation-submit" | "reservation-cancel"): Promise<void> {
     if (!this.enabled()) throw new Error("真机控制模式已关闭，不发送蓝牙指令");
     const writer = this.writer;
     if (!writer || !this.server?.connected) throw new Error("蓝牙连接已断开");
@@ -329,13 +372,14 @@ export class ChargerClient {
     this.sniffTimer = null;
     this.rejectAuth(new Error("蓝牙连接已断开"));
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"));
+    this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"));
     const server = this.server;
     if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
     this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
     this.device = null; this.server = null; this.writer = null; this.listener = null;
     try { if (server?.connected) server.disconnect(); } catch { /* 连接可能已自行断开 */ }
     this.protocol = null; this.latest = null; this.latestAt = 0;
-    this.autoLoginTried = false; this.decoder.reset();
+    this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset();
     this.setPhase("offline", "未连接充电桩");
   }
 }

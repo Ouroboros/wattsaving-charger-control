@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChargerClient, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
+import { nextMidnight } from "../src/protocol";
 
 class MemoryStorage {
   private values = new Map<string,string>();
@@ -11,7 +12,7 @@ class MemoryStorage {
 }
 const authOk = "@%DP-101-0-181-1-@";
 const authBad = "@%DP-101-0-181-0-@";
-const stateFrame = (state: string): string => `@%DP-107-0-181-68-32-26-${state}-0-1-2-1200-230-23-0-0-0-@`;
+const stateFrame = (state: string, mode = "2", lock = "1"): string => `@%DP-107-0-181-68-32-26-${state}-0-${lock}-${mode}-1200-230-23-0-0-0-@`;
 class FakeNotifier extends EventTarget {
   readonly uuid = "0000ff01-0000-1000-8000-00805f9b34fb";
   readonly properties = { notify: true };
@@ -31,6 +32,10 @@ class FakeWriter extends EventTarget {
   readonly properties = { write: true };
   readonly sent: string[] = [];
   authAccept = true;
+  reservationAccept = true;
+  reservationCancelAccept = true;
+  reservationCancelStatus = true;
+  reservationAck = true;
   constructor(private readonly notifier: FakeNotifier) { super(); }
   async writeValueWithResponse(data: BufferSource): Promise<void> {
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -40,6 +45,14 @@ class FakeWriter extends EventTarget {
     if (frame.startsWith("@%PD-204")) queueMicrotask(() => this.notifier.push(stateFrame("2")));
     if (frame.startsWith("@%PD-102")) queueMicrotask(() => { this.notifier.push("@%DP-103-0-181-1-@"); this.notifier.push(stateFrame("4")); });
     if (frame.startsWith("@%PD-104")) queueMicrotask(() => { this.notifier.push("@%DP-105-0-181-1-@"); this.notifier.push(stateFrame("2")); });
+    if (frame.startsWith("@%PD-114") && this.reservationAck) queueMicrotask(() => {
+      this.notifier.push(`@%DP-115-0-181-${this.reservationAccept ? "1" : "0"}-@`);
+      if (this.reservationAccept) this.notifier.push(stateFrame("2", "3"));
+    });
+    if (frame.startsWith("@%PD-116") && this.reservationAck) queueMicrotask(() => {
+      this.notifier.push(`@%DP-117-0-181-${this.reservationCancelAccept ? "1" : "0"}-@`);
+      if (this.reservationCancelAccept && this.reservationCancelStatus) this.notifier.push(stateFrame("2"));
+    });
   }
 }
 class FakeDevice extends EventTarget implements BleDevice {
@@ -132,4 +145,42 @@ test("真实 BLE 生命周期日志覆盖授权、控制与回执且不输出密
   const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
   for (const event of ["chooser-open", "gatt-connected", "service-found", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
   for (const secret of ["98765", "private-device-id", "测试设备", "@%PD-100"]) assert.equal(output.includes(secret), false);
+});
+test("预约和取消需设备匹配回执；拒绝及断线不冒充成功；日志不含原始报文", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-reservation-device");
+  const log = new Diagnostics(null);
+  const events: string[] = [];
+  const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event.type), () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  await client.login("98765", false); await tick();
+  const reservation = { start: nextMidnight(), end: { kind: "full" as const } };
+  assert.equal(client.canCancelReservation, false);
+  device.notifier.push(stateFrame("2", "3"));
+  assert.equal(client.canCancelReservation, true);
+  device.notifier.push(stateFrame("2"));
+  device.notifier.push(stateFrame("2", "2", "0"));
+  assert.throws(() => client.submitReservation(reservation), /上锁/);
+  device.notifier.push(stateFrame("2"));
+  await client.submitReservation(reservation);
+  assert.equal(client.canCancelReservation, true);
+  assert.equal(client.currentStatus?.mode, "3");
+  device.writer.reservationCancelStatus = false;
+  await client.cancelReservation();
+  assert.equal(client.canCancelReservation, false);
+  assert.equal(client.currentStatus?.mode, "3");
+  device.notifier.push(stateFrame("2"));
+  assert.equal(client.currentStatus?.mode, "2");
+  assert.deepEqual(events.filter(event => event === "reservation"), ["reservation", "reservation"]);
+  device.writer.reservationAccept = false;
+  await assert.rejects(client.submitReservation(reservation), /拒绝/);
+  assert.equal(events.filter(event => event === "reservation").length, 2);
+  device.writer.reservationAck = false;
+  const pending = client.submitReservation(reservation);
+  client.disconnect();
+  await assert.rejects(pending, /结果未知/);
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const event of ["reservation-request", "reservation-reply", "reservation-unconfirmed"]) assert.ok(output.includes(event));
+  for (const secret of ["98765", "private-reservation-device", "@%PD-114"]) assert.equal(output.includes(secret), false);
 });

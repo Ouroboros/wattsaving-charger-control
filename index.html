@@ -13,7 +13,7 @@
     .workspace-head { padding:20px 24px; background:#f9fbf8; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; } .workspace-head h1 { font-size:1.35rem; margin:0; } .workspace-head small { color:var(--muted); }
     .screen { padding:22px 24px 26px; } [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; }
     .panel h2 { font-size:1rem; margin:0 0 10px; } .panel p { margin:5px 0 12px; } .panel .sub { color:var(--muted); font-size:.86rem; } .panel label { display:block; margin:12px 0 5px; font-weight:600; } .panel label.check { display:flex; gap:7px; align-items:center; font-weight:400; font-size:.85rem; }
-    select,input[type=password],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
+    select,input[type=password],input[type=datetime-local],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
     .status { display:inline-flex; align-items:center; gap:7px; font-size:.84rem; padding:5px 11px; border-radius:99px; background:#eff0ed; }
     .status:before { content:""; width:8px; height:8px; background:#81908c; border-radius:100%; } .status.good { color:#0d694e; background:#e1f4e9; } .status.good:before { background:#12a26e; }
     .hero { background:linear-gradient(138deg,#163d36,#285b44); color:white; padding:22px; border-radius:16px; margin:0 0 16px; } .hero h2 { font-size:1.45rem; margin:13px 0 8px; } .hero p { color:#d6e9d9; font-size:.86rem; margin:0; }
@@ -49,6 +49,16 @@
         <div class="actions"><button class="secondary" id="liveUnlock" type="button" disabled>解除电子锁</button><button class="secondary" id="liveRefresh" type="button" disabled>同步时钟并刷新状态</button></div>
         <p class="footer">充停需实时状态满足旧应用中的条件；发出后需等待设备确认。刷新会发送设备时钟同步帧。</p>
       </div>
+      <div class="panel" id="reservePanel"><h2>预约充电</h2><p class="sub">预约开始时间自动预填<strong>次日 00:00</strong>；不会自动提交，确认后才向设备发送。</p>
+        <label for="reserveStart">预约开始（iPhone 本地时间）</label><input id="reserveStart" type="datetime-local" step="60" required>
+        <button id="reserveTomorrow" class="secondary full" type="button" style="margin-top:8px">重新设为次日 00:00</button>
+        <label for="reserveEnd">充电结束方式</label><select id="reserveEnd"><option value="full">自动充满</option><option value="time">按时长</option><option value="energy">按电量</option></select>
+        <div id="reserveTimeBox" hidden><label for="reserveHours">预约充电时长</label><select id="reserveHours"><option value="1">1 小时</option><option value="2">2 小时</option><option value="3">3 小时</option><option value="4">4 小时</option><option value="5">5 小时</option><option value="6">6 小时</option><option value="7">7 小时</option><option value="8">8 小时</option><option value="9">9 小时</option><option value="10">10 小时</option><option value="11">11 小时</option><option value="12">12 小时</option></select></div>
+        <div id="reserveEnergyBox" hidden><label for="reserveEnergy">预约充电电量</label><select id="reserveEnergy"><option value="5">5 度</option><option value="10">10 度</option><option value="15">15 度</option><option value="20">20 度</option><option value="25">25 度</option><option value="30">30 度</option><option value="35">35 度</option><option value="40">40 度</option><option value="45">45 度</option><option value="50">50 度</option><option value="55">55 度</option><option value="60">60 度</option><option value="65">65 度</option><option value="70">70 度</option><option value="75">75 度</option><option value="80">80 度</option><option value="85">85 度</option><option value="90">90 度</option><option value="95">95 度</option><option value="99">99 度（原应用最大实际编码）</option></select></div>
+        <p class="sub" id="reserveState" role="status" aria-live="polite">连接并授权后，收到设备实时状态即可预约。</p>
+        <div class="actions"><button class="primary" id="reserveSubmit" type="button" disabled>提交预约</button><button class="danger" id="reserveCancel" type="button" disabled>取消预约</button></div>
+        <p class="footer">需在未来 24 小时内预约，先插枪并上锁。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。设备确认后由充电桩自行执行；网页不会在后台定时发送开始指令。</p>
+      </div>
       <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
       <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="status" aria-live="polite">尚无设备事件</div></div>
       <div class="panel"><h2>诊断日志</h2><p class="sub">仅保存在此浏览器的网站数据中，最多保留最近 160 条。导出前仍请自行检查内容；不会采集原始蓝牙报文、验证码或设备 ID。</p>
@@ -56,9 +66,9 @@
         <label for="diagnosticsText">可直接长按全选并复制</label><textarea id="diagnosticsText" readonly spellcheck="false" aria-label="可复制的脱敏诊断日志"></textarea>
         <div class="actions"><button class="danger" id="clearDiagnostics" type="button">清空日志</button></div><p class="footer" id="diagnosticsHint">如浏览器禁止自动复制，可长按上方文本手动复制。</p>
       </div>
-      <div class="notice">“次日 00:00”的含义未确认，本版本不发送预约/定时指令。没有在真实充电桩上验证前，请勿把网页状态当成设备安全保证。</div>
+      <div class="notice">尚未与真实充电桩及 Bluefy 联调。首次预约请在设备旁核对设备回执、预约开始时间和结束方式；收到提交回执不等于预约已按时执行。</div>
     </div>
   </section></main>
-  <script defer src="./app.js"></script>
+  <script defer src="./app.js?v=reservation-v1"></script>
 </body>
 </html>

@@ -1,7 +1,23 @@
-// 旧小程序 pages/password/password.js 与 pages/index/index.js 中已核实的报文。
-// 未确认“次日 00:00”的语义，因此故意不提供预约指令。
+// 旧小程序 pages/password/password.js、pages/index/index.js、pages/reserve/reserve.js 中的报文。
 export type Version = 1 | 2;
 export type ControlAction = "start" | "stop" | "unlock";
+export type ReservationEnd = { kind: "full" } | { kind: "time"; minutes: number } | { kind: "energy"; kWh: number };
+export interface Reservation { start: Date; end: ReservationEnd; }
+export type ReservationAction = "submit" | "cancel";
+export function nextMidnight(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+}
+// datetime-local 没有时区后缀；显式按设备使用者的本地时间解析并拒绝不存在的时间。
+export function parseLocalMinute(value: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value);
+  if (!match) throw new Error("预约时间格式无效");
+  const [year, month, day, hour, minute] = match.slice(1).map(Number);
+  const date = new Date(year, month - 1, day, hour, minute);
+  if (date.getFullYear() !== year || date.getMonth() + 1 !== month || date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) {
+    throw new Error("预约时间不是有效的本地时间");
+  }
+  return date;
+}
 export interface DeviceStatus {
   type: "status";
   protocol: Version;
@@ -22,6 +38,7 @@ export interface DeviceStatus {
 export type Frame = DeviceStatus |
   { type: "auth"; protocol: Version; ok: boolean; code: string } |
   { type: "ack"; protocol: 2; action: "start" | "stop"; ok: boolean; code: string } |
+  { type: "reservation"; protocol: Version; action: ReservationAction; ok: boolean; code: string } |
   { type: "unknown"; protocol: 2; code: string };
 
 const commands: Record<Version, Record<ControlAction, string>> = {
@@ -29,6 +46,8 @@ const commands: Record<Version, Record<ControlAction, string>> = {
   2: { start: "@%PD-102-0-181-@", stop: "@%PD-104-0-181-@", unlock: "@%PD-108-0-181-@" }
 };
 const numeric = (value: string | undefined): boolean => /^\d+$/.test(value ?? "");
+const pad = (value: number): string => String(value).padStart(2, "0");
+const calendar = (date: Date): string[] => [String(date.getFullYear()), pad(date.getMonth() + 1), pad(date.getDate()), pad(date.getHours()), pad(date.getMinutes())];
 export function checksum(body: string): string {
   if (body.length !== 19 || !numeric(body)) throw new Error("旧版帧主体须为 19 位数字");
   return String([...body].reduce((sum, digit) => sum + Number(digit), 0) % 10);
@@ -42,9 +61,39 @@ export function command(protocol: Version, action: "auth" | ControlAction, passw
   return commands[protocol][action];
 }
 export function syncClock(protocol: Version, date = new Date()): string {
-  const pad = (value: number): string => String(value).padStart(2, "0");
-  const parts = [String(date.getFullYear()), pad(date.getMonth() + 1), pad(date.getDate()), pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds())];
+  const parts = [...calendar(date), pad(date.getSeconds())];
   return protocol === 1 ? appendChecksum(`821${parts.join("")}06`) : `@%PD-204-0-181-${parts.join("-")}-@`;
+}
+export function validateReservation(reservation: Reservation, now = new Date()): void {
+  const start = reservation.start;
+  if (!(start instanceof Date) || !Number.isFinite(start.getTime()) || !Number.isFinite(now.getTime()) || start.getFullYear() < 1000 || start.getFullYear() > 9999 || start.getSeconds() || start.getMilliseconds()) {
+    throw new Error("预约开始时间无效，须精确到分钟");
+  }
+  const offset = start.getTime() - now.getTime();
+  if (offset <= 0 || offset > 24 * 60 * 60 * 1000) throw new Error("预约开始时间须在未来 24 小时内");
+  if (reservation.end.kind === "time" && (!Number.isInteger(reservation.end.minutes) || reservation.end.minutes < 60 || reservation.end.minutes > 720 || reservation.end.minutes % 60 !== 0)) {
+    throw new Error("预约时长仅支持 1 至 12 小时（整小时）");
+  }
+  if (reservation.end.kind === "energy" && (!Number.isInteger(reservation.end.kWh) || reservation.end.kWh < 5 || reservation.end.kWh > 99 || reservation.end.kWh % 5 !== 0 && reservation.end.kWh !== 99)) {
+    throw new Error("预约电量仅支持 5 至 95 度（每档 5 度）或 99 度");
+  }
+  if (!["full", "time", "energy"].includes(reservation.end.kind)) throw new Error("未知的充电结束方式");
+}
+export function reservationCommand(protocol: Version, action: ReservationAction, reservation?: Reservation, now = new Date()): string {
+  if (action === "cancel") {
+    if (reservation) throw new Error("取消预约不得携带新的预约条件");
+    return protocol === 1 ? "80176000000000000068" : "@%PD-116-0-181-@";
+  }
+  if (action !== "submit" || !reservation) throw new Error("提交预约须提供开始时间与结束条件");
+  validateReservation(reservation, now);
+  const start = calendar(reservation.start);
+  const clock = [...calendar(now), pad(now.getSeconds())];
+  const end = reservation.end;
+  const pattern = end.kind === "full" ? "3" : end.kind === "time" ? "1" : "2";
+  const minutes = end.kind === "time" ? String(end.minutes).padStart(3, "0") : "000";
+  const energy = end.kind === "energy" ? String(end.kWh).padStart(4, "0") : "0000";
+  if (protocol === 1) return appendChecksum(`811${clock.join("")}06`) + appendChecksum(`812${start.join("")}0006`) + appendChecksum(`813${pattern}${minutes}${energy}10000006`);
+  return `@%PD-114-0-181-${clock.join("-")}-${start.join("-")}-00-${pattern}-${minutes}-${energy}-100-@`;
 }
 function status(protocol: Version, fields: string[]): DeviceStatus | null {
   if (fields.length < 13 || !fields.slice(0, 3).every(numeric) || ![fields[3], fields[5], fields[10]].every(numeric)) return null;
@@ -62,6 +111,7 @@ export function parseNew(frame: string): Frame | null {
   const code = parts[1];
   if (code === "101") return { type: "auth", protocol: 2, ok: parts[4] === "1", code: parts[4] ?? "" };
   if (code === "103" || code === "105") return { type: "ack", protocol: 2, action: code === "103" ? "start" : "stop", ok: parts[4] === "1", code: parts[4] ?? "" };
+  if ((code === "115" || code === "117") && (parts[4] === "0" || parts[4] === "1")) return { type: "reservation", protocol: 2, action: code === "115" ? "submit" : "cancel", ok: parts[4] === "1", code: parts[4] };
   if (code === "107") return status(2, parts.slice(4, 17));
   return { type: "unknown", protocol: 2, code: code ?? "" };
 }
@@ -73,6 +123,11 @@ export function parseOld(frame: string): Frame | null {
   if (header === "88" && first[1] + second[1] === "88" && trailer === "11") {
     const code = first[4] + second[4];
     return { type: "auth", protocol: 1, ok: code === "33", code };
+  }
+  if (header === "88" && first[1] + second[1] === "88" && trailer === "66") {
+    const kind = first[3] + second[3], code = first[5] + second[5];
+    if (kind === "22" && ["55", "66"].includes(code)) return { type: "reservation", protocol: 1, action: "submit", ok: code === "55", code };
+    if (kind === "33" && ["77", "88"].includes(code)) return { type: "reservation", protocol: 1, action: "cancel", ok: code === "77", code };
   }
   if (!["88", "77", "66"].includes(header) || trailer !== "66" || first[2] !== "1" || second[2] !== "2") return null;
   return status(1, [frame.slice(8, 11), frame.slice(11, 15), frame.slice(15, 18), frame[27], frame.slice(4, 7), frame[3], frame[23], frame.slice(28, 32), frame.slice(35, 38), frame.slice(32, 35), frame[24], frame[26], frame[25]]);
