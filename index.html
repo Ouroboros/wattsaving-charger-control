@@ -3,251 +3,62 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>充电控制 · 交互评审稿</title>
+  <title>WattSaving · 充电桩控制</title>
   <style>
-    :root { color-scheme: light; --ink:#17313b; --muted:#63747b; --line:#dce5e3; --bg:#eff3ef; --surface:#fff; --accent:#0c795b; --soft:#e5f4ec; --warn:#bd6236; --dark:#16372f; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
-    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); } button,input,select { font:inherit; } button { cursor:pointer; } button:disabled { opacity:.48; cursor:not-allowed; }
-    :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .top { background:#122c2a; color:#f4faf6; padding:20px max(22px,calc((100vw - 1160px)/2)); display:flex; gap:20px; align-items:center; justify-content:space-between; }
+    :root { color-scheme:light; --ink:#17313b; --muted:#63747b; --line:#dce5e3; --bg:#eff3ef; --surface:#fff; --accent:#0c795b; --soft:#e5f4ec; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); } button,input,select,textarea { font:inherit; } button { cursor:pointer; } button:disabled { opacity:.48; cursor:not-allowed; }
+    :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .top { background:#122c2a; color:#f4faf6; padding:20px max(22px,calc((100vw - 820px)/2)); display:flex; gap:20px; align-items:center; justify-content:space-between; }
     .top strong { font-size:1.12rem; letter-spacing:.02em; } .top small { display:block; color:#bad5ca; margin-top:3px; } .badge { border:1px solid #7cac91; border-radius:99px; padding:6px 12px; font-size:.76rem; white-space:nowrap; }
-    main { max-width:1160px; margin:26px auto; padding:0 20px; display:grid; grid-template-columns:minmax(285px,340px) minmax(300px,1fr); gap:24px; align-items:start; }
-    .review,.workspace,.live { background:var(--surface); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 36px #18312a0a; }
-    .review { padding:24px; position:sticky; top:18px; } .review h1,.workspace h2 { font-size:1.35rem; margin:0 0 8px; } .review p,.hint { color:var(--muted); font-size:.88rem; margin:0 0 18px; }
-    .choice { border-top:1px solid var(--line); padding:15px 0; } .choice label { font-weight:700; display:block; margin-bottom:7px; } .choice small { display:block; color:var(--muted); font-size:.76rem; margin-top:5px; } select,input[type=text],input[type=password] { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
-    .choice .row { display:flex; gap:8px; flex-wrap:wrap; } .choice .row label { font-size:.82rem; font-weight:400; display:flex; gap:4px; align-items:center; background:#f4f6f3; padding:6px 9px; border-radius:8px; margin:0; }
-    .review-summary { background:#f5f8f5; border:1px dashed #abc2b4; border-radius:12px; padding:12px; white-space:pre-line; font-size:.83rem; color:#3b5652; margin-top:16px; }
-    .workspace { overflow:hidden; } .workspace-head { padding:20px 24px; background:#f9fbf8; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; }
-    .workspace-head h2 { margin:0; } .workspace-head small { color:var(--muted); } .scenarios { display:flex; gap:6px; flex-wrap:wrap; padding:12px 24px; border-bottom:1px solid var(--line); }
-    .scenarios button,.tabs button { border:1px solid var(--line); border-radius:9px; background:white; color:var(--ink); padding:8px 11px; font-size:.82rem; }
-    .scenarios button:hover,.tabs button:hover { border-color:var(--accent); } .tabs { display:flex; gap:7px; padding:14px 24px 0; flex-wrap:wrap; }
-    .tabs button[aria-current=page] { color:white; background:var(--dark); border-color:var(--dark); } .screen { padding:22px 24px 26px; min-height:430px; }
-    .screen[hidden], .tabs button[hidden], [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; }
-    .panel h3 { font-size:1rem; margin:0 0 10px; } .panel p { margin:5px 0 12px; } .panel .sub { color:var(--muted); font-size:.86rem; } .status { display:inline-flex; align-items:center; gap:7px; font-size:.84rem; padding:5px 11px; border-radius:99px; background:#eff0ed; }
+    main { max-width:820px; margin:26px auto; padding:0 20px; } .live { background:var(--surface); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 36px #18312a0a; overflow:hidden; }
+    .workspace-head { padding:20px 24px; background:#f9fbf8; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; } .workspace-head h1 { font-size:1.35rem; margin:0; } .workspace-head small { color:var(--muted); }
+    .screen { padding:22px 24px 26px; } [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; }
+    .panel h2 { font-size:1rem; margin:0 0 10px; } .panel p { margin:5px 0 12px; } .panel .sub { color:var(--muted); font-size:.86rem; } .panel label { display:block; margin:12px 0 5px; font-weight:600; } .panel label.check { display:flex; gap:7px; align-items:center; font-weight:400; font-size:.85rem; }
+    select,input[type=password],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
+    .status { display:inline-flex; align-items:center; gap:7px; font-size:.84rem; padding:5px 11px; border-radius:99px; background:#eff0ed; }
     .status:before { content:""; width:8px; height:8px; background:#81908c; border-radius:100%; } .status.good { color:#0d694e; background:#e1f4e9; } .status.good:before { background:#12a26e; }
-    .status.bad { color:#9b4934; background:#fff0e6; } .status.bad:before { background:#db7043; } .hero { background:linear-gradient(138deg,#163d36,#285b44); color:white; padding:22px; border-radius:16px; margin:0 0 16px; }
-    .hero h3 { font-size:1.45rem; margin:13px 0 8px; } .hero p { color:#d6e9d9; font-size:.86rem; margin:0; } .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-top:19px; }
-    .metric { background:#ffffff17; border:1px solid #ffffff20; border-radius:12px; padding:10px; } .metric strong { display:block; font-size:1.07rem; } .metric span { font-size:.71rem; color:#d5e8dc; }
+    .hero { background:linear-gradient(138deg,#163d36,#285b44); color:white; padding:22px; border-radius:16px; margin:0 0 16px; } .hero h2 { font-size:1.45rem; margin:13px 0 8px; } .hero p { color:#d6e9d9; font-size:.86rem; margin:0; }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-top:19px; } .metric { background:#ffffff17; border:1px solid #ffffff20; border-radius:12px; padding:10px; } .metric strong { display:block; font-size:1.07rem; } .metric span { font-size:.71rem; color:#d5e8dc; }
     .actions { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:16px 0; } .primary,.secondary,.danger { padding:11px 16px; border-radius:11px; font-weight:700; border:1px solid transparent; }
-    .primary { background:var(--accent); color:white; } .primary:hover { background:#096a50; } .secondary { border-color:#b4c9bd; background:#fff; color:#236a54; } .danger { border-color:#e6c9b9; background:#fff4ee; color:#9b4e2d; }
-    .full { width:100%; } .item { display:flex; align-items:center; justify-content:space-between; gap:12px; border:1px solid var(--line); padding:13px 14px; border-radius:11px; margin:9px 0; }
-    .item strong { display:block; } .item small { color:var(--muted); } .item button { white-space:nowrap; } .notice { color:#8c552d; background:#fff6e6; border:1px solid #eed5af; border-radius:10px; padding:11px 12px; font-size:.84rem; }
-    .light { background:var(--soft); border-color:#bddec9; color:#24614b; } .selector { display:flex; flex-direction:column; gap:10px; } .selector label { display:block; border:1px solid var(--line); border-radius:10px; padding:9px 11px; cursor:pointer; }
-    dialog { max-width:min(92vw,430px); width:100%; border:0; border-radius:18px; padding:24px; box-shadow:0 24px 80px #0004; color:var(--ink); } dialog::backdrop { background:#10282098; } dialog h3 { margin:0 0 7px; } dialog p { color:var(--muted); margin:0 0 18px; } dialog .actions { margin-bottom:0; }
-    .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#152e27; color:white; padding:11px 18px; border-radius:11px; max-width:90vw; box-shadow:0 10px 35px #0003; z-index:9; text-align:center; }
-    .top-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; } .top-actions button { border:1px solid #77a18c; border-radius:8px; background:#215245; color:#fff; padding:7px 11px; } .top-actions button[aria-pressed=true] { background:#e7f6e9; color:#153d2c; }
-    main.live-mode { display:block; max-width:820px; } .live { overflow:hidden; } .live .screen { min-height:0; } .log { background:#f5f8f5; border:1px solid var(--line); border-radius:10px; white-space:pre-line; padding:12px; min-height:58px; font-size:.85rem; } .live label { display:block; margin:12px 0 5px; font-weight:600; } .live label.check { display:flex; gap:7px; align-items:center; font-weight:400; font-size:.85rem; } .live small { color:var(--muted); }
-    .footer { font-size:.79rem; color:var(--muted); margin:14px 0 0; } @media(max-width:760px) { .top { padding:15px 18px; flex-wrap:wrap; } main { grid-template-columns:1fr; padding:0 12px; margin:12px auto; gap:12px; } .review { position:static; } .metrics { gap:5px; } .metric { padding:8px; } .workspace-head,.scenarios,.tabs,.screen { padding-left:16px; padding-right:16px; } }
+    .primary { background:var(--accent); color:white; } .primary:hover { background:#096a50; } .secondary { border-color:#b4c9bd; background:#fff; color:#236a54; } .danger { border-color:#e6c9b9; background:#fff4ee; color:#9b4e2d; } .full { width:100%; }
+    .notice { color:#8c552d; background:#fff6e6; border:1px solid #eed5af; border-radius:10px; padding:11px 12px; font-size:.84rem; } .notice.light { background:var(--soft); border-color:#bddec9; color:#24614b; }
+    .log { background:#f5f8f5; border:1px solid var(--line); border-radius:10px; white-space:pre-line; padding:12px; min-height:58px; font-size:.85rem; } .footer,.panel small { font-size:.79rem; color:var(--muted); margin:14px 0 0; }
+    textarea { resize:vertical; min-height:170px; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; margin-top:12px; } textarea:focus { background:#fafdfa; }
+    @media(max-width:760px) { .top { padding:15px 18px; flex-wrap:wrap; } main { padding:0 12px; margin:12px auto; } .workspace-head,.screen { padding-left:16px; padding-right:16px; } .metrics { gap:5px; } .metric { padding:8px; } }
   </style>
 </head>
 <body>
-  <header class="top"><div><strong>WattSaving · 充电控制</strong><small>个人用网页 · 非官方产品</small></div><div class="top-actions"><button id="showLive" type="button" aria-pressed="false">真机控制</button><button id="showDemo" type="button" aria-pressed="true">模拟评审</button><span class="badge" id="modeBadge">模拟评审 · 不发送指令</span></div></header>
-  <main id="appLayout">
-    <aside class="review" id="reviewPanel" aria-label="设计选项">
-      <h1>交互评审台</h1><p>左侧切换候选方案，右侧点击模拟页面。选择仅在本次页面有效，均未定稿。</p>
-      <div class="choice"><label for="midnightMode">D1 · “次日 00:00”是什么意思？</label>
-        <select id="midnightMode"><option value="">尚未决定</option><option value="begin">预约开始时间</option><option value="end">充电结束时间</option><option value="default">仅作为时间默认值</option></select>
-        <small>选“结束时间”仅展示设备能力限制，不会模拟后台定时停止。</small></div>
-      <div class="choice"><label for="reconnectMode">D2 · 下次进入如何连接？</label>
-        <select id="reconnectMode"><option value="">尚未决定</option><option value="manual">点击连接上次设备</option><option value="auto">尝试自动连接（模拟）</option></select>
-        <small>模拟自动连接不代表 iPhone 浏览器能无点击连接真实设备。</small></div>
-      <div class="choice"><label for="authMode">D3 · 连接后如何授权？</label>
-        <select id="authMode"><option value="">尚未决定</option><option value="each">每次输入密码</option><option value="remember">演示记住授权（不保存真实密码）</option><option value="none">演示设备免重复授权</option></select>
-        <small>“记住授权”和“免重复授权”的设备支持都未验证。</small></div>
-      <div class="choice"><label>D4 · 首版展示哪些候选页面？</label><div class="row">
-        <label><input id="showRecords" type="checkbox">充电记录</label><label><input id="showFault" type="checkbox">故障说明</label><label><input id="showSettings" type="checkbox">设置</label>
-      </div></div>
-      <div class="choice"><label for="deviceReply">下一次模拟连接或操作的反馈</label><select id="deviceReply"><option value="ok">成功</option><option value="fail">拒绝</option><option value="timeout">没有回应</option></select><small>只影响页面演示，不发送任何通信。</small></div>
-      <div class="review-summary" id="reviewSummary" aria-live="polite"></div>
-    </aside>
-    <section class="workspace" id="demoWorkspace" aria-label="可点击网页演示">
-      <div class="workspace-head"><div><h2>页面演示</h2><small id="connectionLabel">模拟设备未连接</small></div><span class="status" id="connectionBadge">未连接</span></div>
-      <div class="scenarios" aria-label="场景切换">
-        <button type="button" data-scenario="ready">模拟待机</button><button type="button" data-scenario="charging">模拟充电中</button><button type="button" data-scenario="fault">模拟故障</button><button type="button" data-scenario="disconnect">模拟断线</button>
+  <header class="top"><div><strong>WattSaving · 充电桩控制</strong><small>个人用网页 · 非官方产品</small></div><span class="badge">真机控制 · 尚待实机验证</span></header>
+  <main><section class="live" id="liveWorkspace" aria-label="蓝牙充电桩控制">
+    <div class="workspace-head"><div><h1>充电桩控制</h1><small>状态仅来自设备通知</small></div><span class="status" id="livePhase">未连接</span></div>
+    <div class="screen">
+      <div class="notice" id="liveSupport">正在检测浏览器蓝牙能力…</div>
+      <div class="panel" style="margin-top:16px"><h2>设备连接</h2><p id="liveDevice" class="sub">尚未选择设备</p>
+        <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
+        <p class="footer">自动识别依赖设备通知；若没有通知，可手动选择。无法确认协议时不会发送密码。</p>
+        <div class="actions"><button id="liveChoose" class="primary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
+        <small>协议：<span id="liveProtocolName">等待识别</span>。恢复上次设备依赖 Bluefy 是否支持 getDevices()，失败可手动选择。</small>
       </div>
-      <nav class="tabs" aria-label="候选页面">
-        <button type="button" data-page="charge" aria-current="page">充电</button><button type="button" data-page="schedule">时间 / 预约</button><button type="button" data-page="records" hidden>记录</button><button type="button" data-page="fault" hidden>故障</button><button type="button" data-page="settings" hidden>设置</button>
-      </nav>
-      <div class="screen" id="chargeScreen" data-screen="charge">
-        <div class="panel" id="deviceEntry"><h3>连接设备</h3><p class="sub" id="lastDeviceText">尚无上次设备记录</p><div class="actions"><button class="primary" type="button" id="connectLast">连接上次设备</button><button class="secondary" type="button" id="scanDevices">搜索并选择</button></div><p class="footer">演示设备列表与失败回退，不调用手机蓝牙。</p></div>
-        <div class="panel" id="deviceList" hidden><h3>选择模拟设备</h3><p class="sub">以下名称是演示占位，不代表真实机型。</p><div class="item"><div><strong>模拟充电机 A</strong><small>信号：较强 · 演示 ID A</small></div><button class="secondary" type="button" data-device="模拟充电机 A">连接</button></div><div class="item"><div><strong>模拟充电机 B</strong><small>信号：一般 · 演示 ID B</small></div><button class="secondary" type="button" data-device="模拟充电机 B">连接</button></div></div>
-        <div id="chargeMain" hidden><div class="hero"><span class="status good" id="heroBadge">模拟 · 准备充电</span><h3 id="chargeTitle">准备充电</h3><p id="deviceName">当前设备：模拟充电机 A</p><div class="metrics"><div class="metric"><strong id="socValue">68%</strong><span>电量 SOC · 演示</span></div><div class="metric"><strong id="energyValue">0.0 kWh</strong><span>已充电量 · 演示</span></div><div class="metric"><strong id="durationValue">0 min</strong><span>已充时长 · 演示</span></div></div></div>
-          <div class="panel"><h3>操作</h3><p class="sub" id="actionHint">所有操作只更新模拟页面。</p><div class="actions"><button id="startCharge" class="primary" type="button">开始充电</button><button id="stopCharge" class="danger" type="button">停止充电</button></div><button id="unlockGun" class="secondary full" type="button">解除电子锁</button></div>
-          <div class="panel"><h3>设备反馈</h3><p class="sub" id="responseText">等待操作。页面显示的状态均为演示数据。</p></div></div>
+      <div class="panel" id="liveAuthBox" hidden><h2>设备蓝牙验证码</h2><label for="livePassword">五位验证码</label><input id="livePassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="仅发送给所选 BLE 设备">
+        <label class="check"><input id="rememberPassword" type="checkbox" checked>验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
+        <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
       </div>
-      <div class="screen" data-screen="schedule" hidden><div class="panel"><h3>次日 00:00</h3><p id="scheduleExplanation" class="sub">请在左侧选择 D1 的含义，才能评审此处的具体交互。</p><div id="scheduleContent"></div></div><div class="notice">本页面绝不在手机后台等待零点发送停止指令；实际定时能力须由设备协议验证。</div></div>
-      <div class="screen" data-screen="records" hidden><div class="panel"><h3>充电记录 · 候选</h3><p class="sub">此页暂用空状态评审：记录保存在哪里、是否需跨手机同步，均未确定。</p><div class="notice light">暂无演示记录；不会读取旧小程序的本地数据。</div></div></div>
-      <div class="screen" data-screen="fault" hidden><div class="panel"><h3>故障说明 · 候选</h3><p class="sub">请先确认是否要把旧小程序的故障码与处理提示迁入首版。这里不提供未经确认的故障处理指导。</p><button class="secondary" type="button" id="demoFault">模拟故障状态</button></div></div>
-      <div class="screen" data-screen="settings" hidden><div class="panel"><h3>设置 · 候选</h3><p class="sub">授权方式、即插即充、VIN 和固件升级都待决定是否纳入；此处没有真实设备设置入口。</p><button class="secondary" type="button" id="forgetDevice">忘记演示设备记录</button></div></div>
-    </section>
-    <section class="live" id="liveWorkspace" aria-label="真实蓝牙设备控制" hidden>
-      <div class="workspace-head"><div><h2>真机控制</h2><small>仅接受设备状态确认，不使用模拟数据</small></div><span class="status" id="livePhase">未连接</span></div>
-      <div class="screen">
-        <div class="notice" id="liveSupport">正在检测浏览器蓝牙能力…</div>
-        <div class="panel" style="margin-top:16px"><h3>设备连接</h3><p id="liveDevice" class="sub">尚未选择设备</p>
-          <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
-          <p class="footer">自动识别依赖设备通知；若没有通知，可在这里手动选择。无法确认协议时不会发送密码。</p>
-          <div class="actions"><button id="liveChoose" class="primary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
-          <small>协议：<span id="liveProtocolName">等待识别</span>。恢复上次设备依赖 Bluefy 对 getDevices() 的支持，失败可手动选择。</small>
-        </div>
-        <div class="panel" id="liveAuthBox" hidden><h3>设备蓝牙验证码</h3><label for="livePassword">五位验证码</label><input id="livePassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="仅发送给所选 BLE 设备">
-          <label class="check"><input id="rememberPassword" type="checkbox" checked>此设备验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
-          <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
-        </div>
-        <div class="hero"><span class="status good">真机状态 · 需设备通知</span><h3 id="liveState">等候设备实时状态</h3><p id="liveFreshness">尚未收到设备状态</p>
-          <div class="metrics"><div class="metric"><strong id="liveSoc">--</strong><span>SOC</span></div><div class="metric"><strong id="liveEnergy">--</strong><span>已充电量</span></div><div class="metric"><strong id="liveMinutes">--</strong><span>已充时长</span></div></div></div>
-        <div class="panel"><h3>充电操作</h3><p class="sub" id="liveElectrical">无设备数据</p>
-          <div class="actions"><button class="primary" id="liveStart" type="button" disabled>开始充电</button><button class="danger" id="liveStop" type="button" disabled>停止充电</button></div>
-          <div class="actions"><button class="secondary" id="liveUnlock" type="button" disabled>解除电子锁</button><button class="secondary" id="liveRefresh" type="button" disabled>同步时钟并刷新状态</button></div>
-          <p class="footer">充停需实时状态满足旧应用中的条件；发出后需等待设备确认。刷新会发送设备时钟同步帧。</p>
-        </div>
-        <div class="panel"><h3>连接与本地数据</h3><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
-        <div class="panel"><h3>设备反馈</h3><div class="log" id="liveLog" role="status" aria-live="polite">尚无设备事件</div></div>
-        <div class="notice">“次日 00:00”的含义未确认，本版本不发送预约/定时指令。没有在真实充电机上验证前，请勿把网页状态当成设备安全保证。</div>
+      <div class="hero"><span class="status good">真机状态 · 需设备通知</span><h2 id="liveState">等候设备实时状态</h2><p id="liveFreshness">尚未收到设备状态</p>
+        <div class="metrics"><div class="metric"><strong id="liveSoc">--</strong><span>SOC</span></div><div class="metric"><strong id="liveEnergy">--</strong><span>已充电量</span></div><div class="metric"><strong id="liveMinutes">--</strong><span>已充时长</span></div></div></div>
+      <div class="panel"><h2>充电操作</h2><p class="sub" id="liveElectrical">无设备数据</p>
+        <div class="actions"><button class="primary" id="liveStart" type="button" disabled>开始充电</button><button class="danger" id="liveStop" type="button" disabled>停止充电</button></div>
+        <div class="actions"><button class="secondary" id="liveUnlock" type="button" disabled>解除电子锁</button><button class="secondary" id="liveRefresh" type="button" disabled>同步时钟并刷新状态</button></div>
+        <p class="footer">充停需实时状态满足旧应用中的条件；发出后需等待设备确认。刷新会发送设备时钟同步帧。</p>
       </div>
-    </section>
-  </main>
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <dialog id="authDialog" aria-labelledby="authTitle"><h3 id="authTitle">模拟授权</h3><p id="authHint">输入任意五位数字，只演示页面流转；不会保存或发送密码。</p><label for="demoPassword">演示密码</label><input type="password" id="demoPassword" maxlength="5" inputmode="numeric" autocomplete="off" placeholder="仅演示五位输入"><div class="actions"><button class="secondary" id="cancelAuth" type="button">取消</button><button class="primary" id="submitAuth" type="button">模拟通过</button></div></dialog>
-  <dialog id="confirmDialog" aria-labelledby="confirmTitle"><h3 id="confirmTitle">确认操作</h3><p id="confirmDescription"></p><div class="actions"><button class="secondary" id="cancelControl" type="button">返回</button><button class="primary" id="confirmControl" type="button">确认模拟操作</button></div></dialog>
-  <script>
-    "use strict";
-    // 本文件仅用于交互评审：不访问真实蓝牙、后端或设备。
-    const $ = id => document.getElementById(id);
-    const savedKey = "wattsaving-review-device";
-    const state = { page: "charge", link: "offline", device: "", last: "", charge: "ready", lock: true, busy: false, action: "" };
-    try { state.last = localStorage.getItem(savedKey) || ""; } catch { /* 隐私模式可能禁用存储 */ }
-    const labels = { ready: "准备充电", charging: "正在充电", fault: "充电故障" };
-    const meanings = { "": "未定", begin: "预约开始", end: "充电结束", default: "仅时间默认值" };
-    const reconnectLabels = { "": "未定", manual: "手动点击", auto: "自动尝试（模拟）" };
-    const authLabels = { "": "未定", each: "每次输入", remember: "记住授权（模拟）", none: "设备免重复授权（模拟）" };
-    let toastTimer;
-    function toast(text) { const el = $("toast"); el.textContent = text; el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, 3700); }
-    function nextMidnight() { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1); }
-    function pad(n) { return String(n).padStart(2, "0"); }
-    function displayTime(d) { return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} 00:00`; }
-    function textOf(id, value) { $(id).textContent = value; }
-    function render() {
-      const connected = state.link === "ready";
-      const badge = $("connectionBadge");
-      badge.className = `status ${connected ? "good" : state.link === "offline" ? "" : "bad"}`;
-      badge.textContent = connected ? "模拟已连接" : state.link === "offline" ? "未连接" : state.link === "connecting" ? "模拟连接中" : "模拟待授权";
-      textOf("connectionLabel", connected ? `当前：${state.device} · 无真实 BLE` : "模拟设备未连接");
-      textOf("lastDeviceText", state.last ? `上次选择：${state.last}（仅此浏览器演示记录）` : "尚无上次设备记录");
-      $("connectLast").disabled = !state.last || state.link === "connecting";
-      $("deviceEntry").hidden = connected;
-      $("deviceList").hidden = connected || $("deviceList").dataset.open !== "yes";
-      $("chargeMain").hidden = !connected;
-      textOf("deviceName", `当前设备：${state.device}（模拟）`);
-      textOf("chargeTitle", labels[state.charge]);
-      const hero = $("heroBadge"); hero.className = `status ${state.charge === "fault" ? "bad" : "good"}`;
-      hero.textContent = `模拟 · ${labels[state.charge]}`;
-      textOf("socValue", state.charge === "charging" ? "72%" : "68%");
-      textOf("energyValue", state.charge === "charging" ? "3.2 kWh" : "0.0 kWh");
-      textOf("durationValue", state.charge === "charging" ? "26 min" : "0 min");
-      $("startCharge").disabled = !connected || state.charge !== "ready" || state.busy;
-      $("stopCharge").disabled = !connected || state.charge !== "charging" || state.busy;
-      $("unlockGun").disabled = !connected || state.charge === "charging" || !state.lock || state.busy;
-      textOf("actionHint", state.charge === "fault" ? "模拟故障：控制按钮不可用；实际故障处理待确认。" : "按钮需要确认。成功/拒绝/超时由评审台模拟选择。");
-      if (state.page === "records" && !$("showRecords").checked || state.page === "fault" && !$("showFault").checked || state.page === "settings" && !$("showSettings").checked) state.page = "charge";
-      for (const tab of document.querySelectorAll("[data-page]")) {
-        const optional = { records:"showRecords", fault:"showFault", settings:"showSettings" }[tab.dataset.page];
-        tab.hidden = optional ? !$(optional).checked : false;
-        tab.setAttribute("aria-current", state.page === tab.dataset.page ? "page" : "false");
-      }
-      for (const screen of document.querySelectorAll("[data-screen]")) screen.hidden = screen.dataset.screen !== state.page;
-      textOf("reviewSummary", `未定决策的当前演示选项\nD1 次日零点：${meanings[$("midnightMode").value]}\nD2 上次设备：${reconnectLabels[$("reconnectMode").value]}\nD3 连接授权：${authLabels[$("authMode").value]}\nD4 附加页面：${["showRecords","showFault","showSettings"].filter(id => $(id).checked).length} 项\nD5 设备型号 / D6 最终容器：仍未确定`);
-      renderSchedule();
-    }
-    function renderSchedule() {
-      const mode = $("midnightMode").value;
-      const target = displayTime(nextMidnight());
-      const content = $("scheduleContent");
-      content.replaceChildren();
-      textOf("scheduleExplanation", mode === "" ? "先在评审台选择一种候选含义；目前没有确认的时间交互。" : `目标时间（按手机本地日历计算）：${target}`);
-      if (!mode) return;
-      const p = document.createElement("p"); p.className = "sub";
-      p.textContent = mode === "begin" ? "候选 A：一键填入预约开始时间；是否自动提交待审。" : mode === "end" ? "候选 B：希望在此时结束充电；尚无证据证明设备接受绝对结束时间或足够长的时长。" : "候选 C：只作为选择器默认值；不自动提交指令。";
-      content.append(p);
-      const button = document.createElement("button"); button.type = "button"; button.className = "secondary";
-      button.textContent = mode === "end" ? "查看能力限制" : "模拟选用这个时间";
-      button.addEventListener("click", () => toast(mode === "end" ? "设备定时能力未确认；演示页不会后台计时停止充电。" : `仅演示已选择 ${target}；未发送预约。`));
-      content.append(button);
-    }
-    function scan() { state.page = "charge"; $("deviceList").dataset.open = "yes"; state.link = "offline"; render(); toast("已列出演示设备；没有扫描手机蓝牙。"); }
-    function connect(device) {
-      if (!device || state.link === "connecting") return;
-      state.device = device; state.link = "connecting"; state.page = "charge"; $("deviceList").dataset.open = "no"; render();
-      toast(`正在模拟连接 ${device}`);
-      setTimeout(() => {
-        if (state.link !== "connecting" || state.device !== device) return;
-        // 连接结果由评审台模拟；失败时明确回退，不改连别的设备。
-        if ($("deviceReply").value === "fail") { state.link = "offline"; state.device = ""; render(); toast("模拟连接失败：请选择搜索并重试。"); return; }
-        if ($("deviceReply").value === "timeout") { state.link = "offline"; state.device = ""; render(); toast("模拟连接无回应：请手动重试或搜索。"); return; }
-        const auth = $("authMode").value;
-        if (auth === "remember" && state.last === device || auth === "none") { authorize("按待审的免输入方案演示授权，非实际设备能力"); }
-        else { state.link = "auth"; render(); $("demoPassword").value = ""; $("authDialog").showModal(); }
-      }, 650);
-    }
-    function authorize(message) {
-      if (!state.device || (state.link !== "auth" && state.link !== "connecting")) return;
-      state.link = "ready"; state.last = state.device; state.charge = "ready"; state.lock = true;
-      try { localStorage.setItem(savedKey, state.last); } catch { /* 演示存储失败时仍可在本页继续 */ }
-      render(); toast(message || "模拟授权通过；仅保存演示设备 ID，未保存密码。");
-    }
-    function control(action) {
-      if (state.link !== "ready" || state.busy) return;
-      if (action === "start" && state.charge !== "ready" || action === "stop" && state.charge !== "charging" || action === "unlock" && (state.charge === "charging" || !state.lock)) return;
-      state.action = action;
-      textOf("confirmTitle", { start:"开始充电？", stop:"停止充电？", unlock:"解除电子锁？" }[action]);
-      textOf("confirmDescription", "这是模拟确认框：确认后仅改变网页演示状态，不向充电机发出指令。");
-      $("confirmDialog").showModal();
-    }
-    function finishControl() {
-      const action = state.action; if (!action) return;
-      $("confirmDialog").close(); state.busy = true; render(); textOf("responseText", "模拟指令已提交，正在等待模拟设备反馈（不是已成功）…");
-      setTimeout(() => {
-        state.busy = false; state.action = "";
-        const reply = $("deviceReply").value;
-        if (state.link !== "ready") { render(); return; }
-        if (reply === "ok") {
-          if (action === "start") state.charge = "charging";
-          if (action === "stop") state.charge = "ready";
-          if (action === "unlock") state.lock = false;
-          textOf("responseText", `模拟设备确认：${{ start:"开始充电", stop:"停止充电", unlock:"电子锁解除" }[action]}。`);
-        } else textOf("responseText", reply === "fail" ? "模拟设备拒绝该操作。" : "模拟等待超时；实际状态未知，不应盲目重复操作。");
-        render();
-      }, 850);
-    }
-    $("scanDevices").addEventListener("click", scan);
-    $("connectLast").addEventListener("click", () => connect(state.last));
-    document.querySelectorAll("[data-device]").forEach(button => button.addEventListener("click", () => connect(button.dataset.device)));
-    document.querySelectorAll("[data-page]").forEach(button => button.addEventListener("click", () => { state.page = button.dataset.page; render(); }));
-    document.querySelectorAll("[data-scenario]").forEach(button => button.addEventListener("click", () => {
-      const scenario = button.dataset.scenario;
-      if (scenario === "disconnect") {
-        for (const id of ["authDialog", "confirmDialog"]) if ($(id).open) $(id).close();
-        state.link = "offline"; state.device = ""; state.busy = false; state.action = ""; state.page = "charge";
-        $("deviceList").dataset.open = "no"; toast("模拟断线：数据不再视为实时。");
-      }
-      else { state.device = state.device || state.last || "模拟充电机 A"; state.link = "ready"; state.charge = scenario; state.lock = true; state.page = "charge"; toast(`已切换为${labels[scenario]}演示状态；没有连接设备。`); }
-      render();
-    }));
-    for (const id of ["midnightMode","authMode","showRecords","showFault","showSettings"]) $(id).addEventListener("change", render);
-    $("reconnectMode").addEventListener("change", () => {
-      render();
-      if ($("reconnectMode").value === "auto" && state.last && state.link === "offline") connect(state.last);
-    });
-    $("startCharge").addEventListener("click", () => control("start"));
-    $("stopCharge").addEventListener("click", () => control("stop"));
-    $("unlockGun").addEventListener("click", () => control("unlock"));
-    $("confirmControl").addEventListener("click", finishControl);
-    $("cancelControl").addEventListener("click", () => { state.action = ""; $("confirmDialog").close(); });
-    $("cancelAuth").addEventListener("click", () => { $("authDialog").close(); state.link = "offline"; state.device = ""; render(); toast("模拟授权已取消；回到设备入口。"); });
-    $("submitAuth").addEventListener("click", () => { if (!/^\d{5}$/.test($("demoPassword").value)) { toast("演示输入应为五位数字。"); return; } $("demoPassword").value = ""; $("authDialog").close(); authorize(); });
-    $("forgetDevice").addEventListener("click", () => { state.last = ""; try { localStorage.removeItem(savedKey); } catch {} render(); toast("演示上次设备记录已清除。"); });
-    $("demoFault").addEventListener("click", () => { state.page = "charge"; state.link = "ready"; state.device ||= state.last || "模拟充电机 A"; state.charge = "fault"; render(); toast("已切换模拟故障，仅用于评审界面反馈。"); });
-    render();
-    if ($("reconnectMode").value === "auto" && state.last) connect(state.last);
-  </script>
+      <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
+      <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="status" aria-live="polite">尚无设备事件</div></div>
+      <div class="panel"><h2>诊断日志</h2><p class="sub">仅保存在此浏览器的网站数据中，最多保留最近 160 条。导出前仍请自行检查内容；不会采集原始蓝牙报文、验证码或设备 ID。</p>
+        <div class="actions"><button class="primary" id="copyDiagnostics" type="button">复制日志</button><button class="secondary" id="selectDiagnostics" type="button">选中日志</button></div>
+        <label for="diagnosticsText">可直接长按全选并复制</label><textarea id="diagnosticsText" readonly spellcheck="false" aria-label="可复制的脱敏诊断日志"></textarea>
+        <div class="actions"><button class="danger" id="clearDiagnostics" type="button">清空日志</button></div><p class="footer" id="diagnosticsHint">如浏览器禁止自动复制，可长按上方文本手动复制。</p>
+      </div>
+      <div class="notice">“次日 00:00”的含义未确认，本版本不发送预约/定时指令。没有在真实充电桩上验证前，请勿把网页状态当成设备安全保证。</div>
+    </div>
+  </section></main>
   <script defer src="./app.js"></script>
 </body>
 </html>

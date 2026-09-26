@@ -123,10 +123,12 @@
     return result;
   }
   var ChargerClient = class {
-    constructor(adapter2, emit, enabled = () => true) {
+    constructor(adapter2, emit, enabled = () => true, diagnose = () => {
+    }) {
       __publicField(this, "adapter");
       __publicField(this, "emit");
       __publicField(this, "enabled");
+      __publicField(this, "diagnose");
       __publicField(this, "device", null);
       __publicField(this, "server", null);
       __publicField(this, "writer", null);
@@ -143,12 +145,14 @@
       __publicField(this, "pendingControl", null);
       __publicField(this, "fallbackVault", { lastId: "", devices: {} });
       __publicField(this, "onDisconnected", () => {
+        this.diagnose("unexpected-disconnect", {}, "warn");
         this.disconnect();
         this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u65AD\u7EBF\uFF1B\u9875\u9762\u6570\u636E\u4E0D\u518D\u89C6\u4E3A\u5B9E\u65F6\u3002" });
       });
       this.adapter = adapter2;
       this.emit = emit;
       this.enabled = enabled;
+      this.diagnose = diagnose;
     }
     get currentDevice() {
       return this.device;
@@ -204,20 +208,28 @@
     }
     async restore() {
       const id = this.loadVault().lastId;
-      if (!id || !this.adapter.getDevices || !this.enabled()) return false;
+      if (!id || !this.adapter.getDevices || !this.enabled()) {
+        this.diagnose("restore-skipped", { remembered: !!id, getDevices: !!this.adapter.getDevices });
+        return false;
+      }
       try {
+        this.diagnose("restore-search");
         const devices = await this.adapter.getDevices();
         const remembered = devices.find((device) => device.id === id);
+        this.diagnose("restore-result", { found: !!remembered, candidates: devices.length });
         if (!remembered || !this.enabled()) return false;
         await this.connect(remembered);
         return true;
       } catch (error) {
+        this.diagnose("restore-error", { kind: error instanceof Error ? error.name : "unknown" }, "warn");
         this.emit({ type: "notice", message: `\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u5931\u8D25\uFF1A${message(error)}\uFF1B\u8BF7\u70B9\u51FB\u9009\u62E9\u8BBE\u5907\u3002` });
         return false;
       }
     }
     async chooseDevice(protocol) {
+      this.diagnose("chooser-open");
       const device = await this.adapter.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+      this.diagnose("chooser-selected", { named: !!device.name });
       if (!this.enabled()) return;
       await this.connect(device, protocol);
     }
@@ -226,6 +238,7 @@
       this.disconnect();
       const epoch = this.epoch;
       this.device = device;
+      this.diagnose("gatt-connect-start");
       this.setPhase("connecting", `\u6B63\u5728\u8FDE\u63A5 ${device.name || "\u672A\u547D\u540D\u8BBE\u5907"}\u2026`);
       try {
         if (!device.gatt) throw new Error("\u8BBE\u5907\u4E0D\u63D0\u4F9B GATT \u670D\u52A1");
@@ -235,6 +248,7 @@
           return;
         }
         this.server = server;
+        this.diagnose("gatt-connected");
         device.addEventListener("gattserverdisconnected", this.onDisconnected);
         let notifier = null, writer = null;
         for (const uuid of SERVICES) {
@@ -242,8 +256,10 @@
           try {
             service = await this.server.getPrimaryService(uuid);
           } catch {
+            this.diagnose("service-unavailable", { service: uuid.slice(4, 8) });
             continue;
           }
+          this.diagnose("service-found", { service: uuid.slice(4, 8) });
           for (const characteristic of await service.getCharacteristics()) {
             const id = characteristic.uuid.toLowerCase();
             if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) notifier = characteristic;
@@ -251,7 +267,8 @@
           }
           if (notifier && writer) break;
         }
-        if (!notifier || !writer) throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u673A\u578B\u53F7");
+        this.diagnose("characteristics", { notify: !!notifier, write: !!writer });
+        if (!notifier || !writer) throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
         this.writer = writer;
         this.listener = (event) => {
           const view = event.target?.value;
@@ -260,6 +277,7 @@
         notifier.addEventListener("characteristicvaluechanged", this.listener);
         await notifier.startNotifications();
         if (epoch !== this.epoch) return;
+        this.diagnose("notifications-started");
         if (!this.protocol) this.setPhase("detecting", "\u5DF2\u8FDE\u63A5\uFF0C\u7B49\u5F85\u8BBE\u5907\u62A5\u6587\u4EE5\u8FA8\u8BC6\u534F\u8BAE\u2026");
         if (!this.protocol && requested) this.chooseProtocol(requested, "\u7528\u6237\u6307\u5B9A");
         else if (!this.protocol) this.sniffTimer = setTimeout(() => {
@@ -272,6 +290,7 @@
           }
         }, 5e3);
       } catch (error) {
+        this.diagnose("gatt-connect-error", { kind: error instanceof Error ? error.name : "unknown" }, "error");
         if (epoch === this.epoch) {
           this.disconnect();
           this.emit({ type: "notice", message: `\u8FDE\u63A5\u5931\u8D25\uFF1A${message(error)}` });
@@ -285,10 +304,12 @@
       if (this.sniffTimer) clearTimeout(this.sniffTimer);
       this.sniffTimer = null;
       this.protocol = version;
+      this.diagnose("protocol-selected", { version, source });
       this.emit({ type: "protocol", version, source });
       if (this.autoLoginTried) return;
       const saved = this.loadVault().devices[this.device.id];
       if (saved?.password && /^\d{5}$/.test(saved.password)) {
+        this.diagnose("auth-cached-available");
         this.autoLoginTried = true;
         void this.login(saved.password, true).catch((error) => {
           this.forgetPassword();
@@ -304,11 +325,12 @@
       if (!this.writer || !this.protocol || !this.server?.connected || !this.device) throw new Error("\u8BF7\u5148\u8FDE\u63A5\u8BBE\u5907\u5E76\u8BC6\u522B\u534F\u8BAE");
       if (this.pendingAuth) throw new Error("\u6B63\u5728\u7B49\u5F85\u4E0A\u4E00\u6B21\u6388\u6743\u7684\u8BBE\u5907\u56DE\u590D");
       const frame = command(this.protocol, "auth", password);
+      this.diagnose("auth-request", { version: this.protocol, remember });
       this.setPhase("authenticating", "\u6B63\u5728\u53D1\u9001\u9A8C\u8BC1\u7801\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026");
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.rejectAuth(new Error("\u6388\u6743\u8D85\u65F6\uFF0C\u4E0D\u80FD\u786E\u8BA4\u8BBE\u5907\u662F\u5426\u63A5\u53D7\u5BC6\u7801")), 9e3);
         this.pendingAuth = { resolve, reject, timer, password, remember };
-        void this.write(frame).catch((error) => this.rejectAuth(new Error(`\u53D1\u9001\u6388\u6743\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`)));
+        void this.write(frame, "auth").catch((error) => this.rejectAuth(new Error(`\u53D1\u9001\u6388\u6743\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`)));
       });
     }
     rejectAuth(error) {
@@ -316,12 +338,13 @@
       const pending = this.pendingAuth;
       this.pendingAuth = null;
       clearTimeout(pending.timer);
+      this.diagnose("auth-unconfirmed", { connected: !!this.server?.connected }, "warn");
       if (this.server?.connected) this.setPhase("password", error.message);
       pending.reject(error);
     }
     async refresh() {
       if (!this.authorized || !this.protocol) throw new Error("\u8BF7\u5148\u901A\u8FC7\u8BBE\u5907\u6388\u6743");
-      await this.write(syncClock(this.protocol));
+      await this.write(syncClock(this.protocol), "clock-sync");
       this.emit({ type: "notice", message: "\u5DF2\u53D1\u9001\u8BBE\u5907\u65F6\u949F\u540C\u6B65\u5E27\uFF0C\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002" });
     }
     control(action) {
@@ -332,10 +355,11 @@
       if (action === "stop" && s.state !== "4") throw new Error("\u53EA\u6709\u5145\u7535\u4E2D\u624D\u80FD\u505C\u6B62");
       if (action === "unlock" && (s.state === "4" || s.mode === "3" || s.lock === "0")) throw new Error("\u5145\u7535\u4E2D\u3001\u9884\u7EA6\u6A21\u5F0F\u6216\u5DF2\u89E3\u9501\u65F6\u4E0D\u80FD\u6267\u884C\u89E3\u9501");
       const frame = command(this.protocol, action);
+      this.diagnose("control-request", { action, state: s.state });
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.rejectControl(new Error("\u8BBE\u5907\u672A\u8FD4\u56DE\u786E\u8BA4\u72B6\u6001\uFF1B\u5B9E\u9645\u72B6\u6001\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5")), 1e4);
         this.pendingControl = { action, resolve, reject, timer };
-        void this.write(frame).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
+        void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
       });
     }
     rejectControl(error) {
@@ -343,6 +367,7 @@
       const pending = this.pendingControl;
       this.pendingControl = null;
       clearTimeout(pending.timer);
+      this.diagnose("control-unconfirmed", { action: pending.action }, "warn");
       pending.reject(error);
     }
     confirmControl() {
@@ -350,18 +375,23 @@
       const pending = this.pendingControl;
       this.pendingControl = null;
       clearTimeout(pending.timer);
+      this.diagnose("control-confirmed", { action: pending.action });
       pending.resolve();
     }
     onBytes(view) {
-      for (const frame of this.decoder.feed(decodeAscii(view))) this.onFrame(frame);
+      const frames = this.decoder.feed(decodeAscii(view));
+      this.diagnose("rx-notification", { bytes: view.byteLength, frames: frames.length });
+      for (const frame of frames) this.onFrame(frame);
     }
     onFrame(frame) {
+      this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
       if (!this.protocol) this.chooseProtocol(frame.protocol, "\u8BBE\u5907\u901A\u77E5");
       if (frame.protocol !== this.protocol) {
         this.emit({ type: "notice", message: "\u6536\u5230\u53E6\u4E00\u79CD\u534F\u8BAE\u7684\u62A5\u6587\uFF1B\u5DF2\u5FFD\u7565\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5207\u6362\u6388\u6743\u534F\u8BAE\u3002" });
         return;
       }
       if (frame.type === "auth" && this.pendingAuth) {
+        this.diagnose("auth-reply", { accepted: frame.ok });
         if (!frame.ok) {
           this.rejectAuth(new Error("\u8BBE\u5907\u62D2\u7EDD\u84DD\u7259\u9A8C\u8BC1\u7801"));
           return;
@@ -380,6 +410,7 @@
         return;
       }
       if (frame.type === "status" && this.authorized) {
+        this.diagnose("status", { state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock });
         this.latest = frame;
         this.latestAt = Date.now();
         this.emit({ type: "status", status: frame });
@@ -387,19 +418,27 @@
         if (action === "start" && frame.state === "4" || action === "stop" && frame.state === "2" || action === "unlock" && frame.lock === "0") this.confirmControl();
       }
       if (frame.type === "ack" && this.pendingControl?.action === frame.action) {
+        this.diagnose("control-ack", { action: frame.action, accepted: frame.ok });
         if (!frame.ok) this.rejectControl(new Error("\u8BBE\u5907\u62D2\u7EDD\u8BE5\u5145\u7535\u64CD\u4F5C"));
         else this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u63A5\u6536\u64CD\u4F5C\uFF0C\u7B49\u5F85\u72B6\u6001\u53D8\u5316\u518D\u786E\u8BA4\u5B8C\u6210\u3002" });
       }
     }
-    async write(text2) {
+    async write(text2, action) {
       if (!this.enabled()) throw new Error("\u771F\u673A\u63A7\u5236\u6A21\u5F0F\u5DF2\u5173\u95ED\uFF0C\u4E0D\u53D1\u9001\u84DD\u7259\u6307\u4EE4");
       const writer = this.writer;
       if (!writer || !this.server?.connected) throw new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00");
       const bytes = encodeAscii(text2);
-      if (writer.properties.write && writer.writeValueWithResponse) await writer.writeValueWithResponse(bytes);
-      else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) await writer.writeValueWithoutResponse(bytes);
-      else if (writer.writeValue) await writer.writeValue(bytes);
-      else throw new Error("\u8BE5\u8BBE\u5907\u7279\u5F81\u4E0D\u53EF\u5199");
+      this.diagnose("tx-attempt", { action, bytes: bytes.length });
+      try {
+        if (writer.properties.write && writer.writeValueWithResponse) await writer.writeValueWithResponse(bytes);
+        else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) await writer.writeValueWithoutResponse(bytes);
+        else if (writer.writeValue) await writer.writeValue(bytes);
+        else throw new Error("\u8BE5\u8BBE\u5907\u7279\u5F81\u4E0D\u53EF\u5199");
+        this.diagnose("tx-written", { action });
+      } catch (error) {
+        this.diagnose("tx-error", { action, kind: error instanceof Error ? error.name : "unknown" }, "error");
+        throw error;
+      }
     }
     disconnect() {
       this.epoch++;
@@ -408,6 +447,7 @@
       this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"));
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
       const server = this.server;
+      if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
       this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
       this.device = null;
       this.server = null;
@@ -422,7 +462,100 @@
       this.latestAt = 0;
       this.autoLoginTried = false;
       this.decoder.reset();
-      this.setPhase("offline", "\u672A\u8FDE\u63A5\u5145\u7535\u673A");
+      this.setPhase("offline", "\u672A\u8FDE\u63A5\u5145\u7535\u6869");
+    }
+  };
+
+  // src/diagnostics.ts
+  var KEY2 = "wattsaving-diagnostics-v1";
+  var MAX_ENTRIES = 160;
+  var MAX_CHARS = 32e3;
+  var HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin/i;
+  var escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  var Diagnostics = class {
+    constructor(storage) {
+      __publicField(this, "storage");
+      __publicField(this, "secrets", /* @__PURE__ */ new Set());
+      __publicField(this, "entries", []);
+      __publicField(this, "persistOk", true);
+      if (storage !== void 0) this.storage = storage;
+      else {
+        try {
+          this.storage = typeof localStorage !== "undefined" ? localStorage : null;
+        } catch {
+          this.storage = null;
+        }
+      }
+      this.persistOk = this.storage !== null;
+      try {
+        const value = JSON.parse(this.storage?.getItem(KEY2) ?? "null");
+        if (Array.isArray(value)) {
+          this.entries = value.slice(-MAX_ENTRIES).filter(
+            (entry) => !!entry && typeof entry === "object" && typeof entry.at === "string" && typeof entry.event === "string" && ["info", "warn", "error"].includes(entry.level) && !!entry.data && typeof entry.data === "object"
+          ).map((entry) => this.cleanEntry(entry));
+        }
+      } catch {
+        this.persistOk = false;
+      }
+    }
+    get storageAvailable() {
+      return this.persistOk;
+    }
+    get recent() {
+      return this.entries;
+    }
+    hide(value) {
+      if (value.length >= 3) this.secrets.add(value);
+    }
+    sanitize(input) {
+      let safe = input.slice(0, 600);
+      for (const secret of this.secrets) safe = safe.replace(new RegExp(escapeRegExp(secret), "gi"), "[REDACTED]");
+      return safe.replace(/@%PD-100-0-181-\d{5}-@/gi, "[AUTH_FRAME]").replace(/80100000\d{5}000006\d?/g, "[AUTH_FRAME]").replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, "[DEVICE_ID]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[DEVICE_ID]").replace(/(?:[a-z]:\\|\/mnt\/|\/Users\/|\/home\/)[^\s"']+/gi, "[LOCAL_PATH]").replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, "[EMAIL]").replace(/\b\d{5,}\b/g, "[NUMBER]");
+    }
+    cleanData(data) {
+      const safe = {};
+      for (const [key, value] of Object.entries(data).slice(0, 12)) {
+        const field = key.replace(/[^a-z0-9_-]/gi, "_").slice(0, 32);
+        if (!field) continue;
+        safe[field] = HIDDEN_FIELD.test(field) ? "[REDACTED]" : typeof value === "string" ? this.sanitize(value) : typeof value === "number" && Number.isFinite(value) ? value : typeof value === "boolean" || value === null ? value : "[REDACTED]";
+      }
+      return safe;
+    }
+    cleanEntry(entry) {
+      return { at: this.sanitize(entry.at).slice(0, 32), level: entry.level, event: entry.event.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 60), data: this.cleanData(entry.data) };
+    }
+    add(event, data = {}, level = "info") {
+      const entry = this.cleanEntry({ at: (/* @__PURE__ */ new Date()).toISOString(), level, event, data });
+      this.entries.push(entry);
+      if (this.entries.length > MAX_ENTRIES) this.entries.shift();
+      let json = JSON.stringify(this.entries);
+      while (json.length > MAX_CHARS && this.entries.length > 1) {
+        this.entries.shift();
+        json = JSON.stringify(this.entries);
+      }
+      try {
+        this.storage?.setItem(KEY2, json);
+      } catch {
+        this.persistOk = false;
+      }
+    }
+    exportText(environment2) {
+      const entries = this.entries.map((entry) => this.cleanEntry(entry));
+      return [
+        "WattSaving diagnostics v1 (no passwords, device IDs or raw BLE frames)",
+        `environment: ${JSON.stringify(environment2)}`,
+        `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
+        ...entries.map((entry) => JSON.stringify(entry))
+      ].join("\n");
+    }
+    clear() {
+      this.entries = [];
+      this.secrets.clear();
+      try {
+        this.storage?.removeItem(KEY2);
+      } catch {
+        this.persistOk = false;
+      }
     }
   };
 
@@ -436,12 +569,24 @@
     el(id).textContent = value;
   };
   var adapter = navigator.bluetooth;
-  var realMode = false;
-  var client = adapter ? new ChargerClient(adapter, handleEvent, () => realMode) : null;
+  var diagnostics = new Diagnostics();
+  var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
+    diagnostics.add(event, data, level);
+    refreshDiagnostics();
+  }) : null;
   var phase = "offline";
   var busy = false;
   var statusAt = 0;
-  var log = [];
+  var recentMessages = [];
+  function environment() {
+    const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" : ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
+    return { secureContext: window.isSecureContext, webBluetooth: !!adapter, getDevices: !!adapter?.getDevices, scheme };
+  }
+  function refreshDiagnostics(force = false) {
+    const area = el("diagnosticsText");
+    if (force || document.activeElement !== area) area.value = diagnostics.exportText(environment());
+    if (!diagnostics.storageAvailable) text("diagnosticsHint", "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u4FDD\u5B58\uFF1B\u5173\u95ED\u9875\u9762\u540E\u65E5\u5FD7\u53EF\u80FD\u4E22\u5931\u3002\u8BF7\u5148\u590D\u5236\u4E0A\u65B9\u6587\u672C\u3002");
+  }
   var stateName = (status2) => {
     if (!status2) return "\u7B49\u5019\u8BBE\u5907\u5B9E\u65F6\u72B6\u6001";
     if (status2.state === "4") return "\u5145\u7535\u4E2D";
@@ -450,13 +595,25 @@
     return `\u8BBE\u5907\u72B6\u6001 ${status2.state || "\u672A\u77E5"}\uFF08\u542B\u4E49\u672A\u6838\u5B9E\uFF09`;
   };
   function record(message2) {
-    log.unshift(message2);
-    if (log.length > 6) log.length = 6;
-    text("liveLog", log.join("\n"));
+    recentMessages.unshift(message2);
+    if (recentMessages.length > 6) recentMessages.length = 6;
+    text("liveLog", recentMessages.join("\n"));
+  }
+  function errorKind(error) {
+    return error instanceof Error ? error.name : "unknown";
+  }
+  function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  function failure(action, error) {
+    diagnostics.add("ui-error", { action, kind: errorKind(error) }, "error");
+    refreshDiagnostics();
+    record(`${action}\u5931\u8D25\uFF1A${errorMessage(error)}`);
   }
   function handleEvent(event) {
     if (event.type === "phase") {
       phase = event.phase;
+      diagnostics.add("phase", { phase });
       record(event.message);
     }
     if (event.type === "notice") record(event.message);
@@ -466,6 +623,7 @@
       statusAt = Date.now();
       record("\u6536\u5230\u8BBE\u5907\u72B6\u6001\u901A\u77E5\u3002");
     }
+    refreshDiagnostics();
     render();
   }
   function render() {
@@ -498,40 +656,9 @@
     const value = el("liveProtocol").value;
     return value === "1" ? 1 : value === "2" ? 2 : void 0;
   }
-  function errorMessage(error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-  function switchMode(real) {
-    const wasReal = realMode;
-    realMode = real;
-    if (!real && wasReal) {
-      client?.disconnect();
-      statusAt = 0;
-    }
-    el("reviewPanel").hidden = real;
-    el("demoWorkspace").hidden = real;
-    el("liveWorkspace").hidden = !real;
-    el("appLayout").classList.toggle("live-mode", real);
-    text("modeBadge", real ? "\u771F\u673A\u6A21\u5F0F \xB7 \u6307\u4EE4\u4F1A\u53D1\u9001\u5230\u8BBE\u5907" : "\u6A21\u62DF\u8BC4\u5BA1 \xB7 \u4E0D\u53D1\u9001\u6307\u4EE4");
-    el("showDemo").setAttribute("aria-pressed", String(!real));
-    el("showLive").setAttribute("aria-pressed", String(real));
-    render();
-    if (real && !wasReal && client?.rememberedName) {
-      record(`\u4E0A\u6B21\u8BBE\u5907\uFF1A${client.rememberedName}\uFF1B\u5C1D\u8BD5\u6062\u590D\u6D4F\u89C8\u5668\u6388\u6743\u2026`);
-      void client.restore().then((restored) => {
-        if (!restored) record("\u6D4F\u89C8\u5668\u672A\u63D0\u4F9B\u53EF\u6062\u590D\u7684\u8BBE\u5907\uFF0C\u8BF7\u70B9\u51FB\u300C\u9009\u62E9\u8BBE\u5907\u300D\u624B\u52A8\u8FDE\u63A5\u3002");
-        render();
-      });
-    }
-  }
-  el("showDemo").addEventListener("click", () => switchMode(false));
-  el("showLive").addEventListener("click", () => switchMode(true));
   el("liveChoose").addEventListener("click", () => {
     if (!client) return;
-    void client.chooseDevice(selectedProtocol()).catch((error) => {
-      record(`\u9009\u62E9/\u8FDE\u63A5\u5931\u8D25\uFF1A${errorMessage(error)}`);
-      render();
-    });
+    void client.chooseDevice(selectedProtocol()).catch((error) => failure("\u9009\u62E9/\u8FDE\u63A5", error));
   });
   el("liveProtocol").addEventListener("change", () => {
     const version = selectedProtocol();
@@ -539,7 +666,7 @@
     try {
       client.chooseProtocol(version);
     } catch (error) {
-      record(errorMessage(error));
+      failure("\u5207\u6362\u534F\u8BAE", error);
     }
     render();
   });
@@ -548,21 +675,22 @@
     const input = el("livePassword");
     const password = input.value;
     if (!/^\d{5}$/.test(password)) {
+      diagnostics.add("auth-input-invalid");
       record("\u84DD\u7259\u9A8C\u8BC1\u7801\u5FC5\u987B\u662F\u4E94\u4F4D\u6570\u5B57\u3002");
       return;
     }
     input.value = "";
     const remember = el("rememberPassword").checked;
-    void client.login(password, remember).catch((error) => record(`\u6388\u6743\u5931\u8D25\uFF1A${errorMessage(error)}`));
+    void client.login(password, remember).catch((error) => failure("\u6388\u6743", error));
   });
   el("liveRefresh").addEventListener("click", () => {
-    if (!client || !window.confirm("\u5C06\u5411\u5145\u7535\u673A\u53D1\u9001\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u201C\u540C\u6B65\u8BBE\u5907\u65F6\u949F\u201D\u6307\u4EE4\uFF0C\u5E76\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002\u7EE7\u7EED\u5417\uFF1F")) return;
-    void client.refresh().catch((error) => record(`\u540C\u6B65\u5931\u8D25\uFF1A${errorMessage(error)}`));
+    if (!client || !window.confirm("\u5C06\u5411\u5145\u7535\u6869\u53D1\u9001\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u201C\u540C\u6B65\u8BBE\u5907\u65F6\u949F\u201D\u6307\u4EE4\uFF0C\u5E76\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002\u7EE7\u7EED\u5417\uFF1F")) return;
+    void client.refresh().catch((error) => failure("\u540C\u6B65\u72B6\u6001", error));
   });
   async function control(action) {
     if (!client) return;
     const name = { start: "\u5F00\u59CB\u5145\u7535", stop: "\u505C\u6B62\u5145\u7535", unlock: "\u89E3\u9664\u7535\u5B50\u9501" }[action];
-    if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u673A\u53D1\u9001\u300C${name}\u300D\u6307\u4EE4\uFF1F
+    if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u6869\u53D1\u9001\u300C${name}\u300D\u6307\u4EE4\uFF1F
 \u6536\u5230\u8BBE\u5907\u72B6\u6001\u53D8\u5316\u540E\u624D\u4F1A\u663E\u793A\u5B8C\u6210\u3002`)) return;
     busy = true;
     render();
@@ -571,7 +699,7 @@
       await client.control(action);
       record(`\u8BBE\u5907\u72B6\u6001\u5DF2\u786E\u8BA4\uFF1A${name}\u3002`);
     } catch (error) {
-      record(`${name}\u672A\u786E\u8BA4\uFF1A${errorMessage(error)}`);
+      failure(name, error);
     } finally {
       busy = false;
       render();
@@ -588,6 +716,7 @@
   el("liveForgetPassword").addEventListener("click", () => {
     if (!window.confirm("\u5220\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u84DD\u7259\u9A8C\u8BC1\u7801\uFF1F\u4E0B\u6B21\u9700\u91CD\u65B0\u8F93\u5165\u3002")) return;
     client?.forgetPassword();
+    diagnostics.add("password-forgotten");
     record("\u5DF2\u5220\u9664\u4FDD\u5B58\u7684\u9A8C\u8BC1\u7801\u3002");
     render();
   });
@@ -595,10 +724,54 @@
     if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u5168\u90E8\u8BBE\u5907\u8BB0\u5F55\u548C\u9A8C\u8BC1\u7801\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
     client?.forgetDevice();
     statusAt = 0;
+    diagnostics.add("device-records-forgotten");
     render();
   });
-  switchMode(!!adapter && window.isSecureContext);
-  setInterval(() => {
-    if (!el("liveWorkspace").hidden) render();
-  }, 5e3);
+  el("copyDiagnostics").addEventListener("click", async () => {
+    const value = diagnostics.exportText(environment());
+    const area = el("diagnosticsText");
+    area.value = value;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(value);
+      text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u590D\u5236\u3002\u8D34\u51FA\u4E4B\u524D\u5EFA\u8BAE\u68C0\u67E5\u6587\u672C\u5185\u5BB9\u3002");
+      diagnostics.add("log-copied", { method: "clipboard" });
+    } catch {
+      area.focus();
+      area.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+      }
+      text("diagnosticsHint", copied ? "\u65E5\u5FD7\u5DF2\u590D\u5236\uFF08\u517C\u5BB9\u65B9\u5F0F\uFF09\u3002" : "\u6D4F\u89C8\u5668\u7981\u6B62\u81EA\u52A8\u590D\u5236\uFF1B\u8BF7\u957F\u6309\u4E0A\u65B9\u6587\u672C\uFF0C\u5168\u9009\u540E\u624B\u52A8\u590D\u5236\u3002");
+      diagnostics.add("log-copy-fallback", { copied }, copied ? "info" : "warn");
+    }
+  });
+  el("selectDiagnostics").addEventListener("click", () => {
+    const area = el("diagnosticsText");
+    area.value = diagnostics.exportText(environment());
+    area.focus();
+    area.select();
+    text("diagnosticsHint", "\u5DF2\u9009\u4E2D\u65E5\u5FD7\uFF1B\u53EF\u4EE5\u4F7F\u7528\u6D4F\u89C8\u5668\u590D\u5236\u83DC\u5355\u3002\u82E5\u672A\u9009\u4E2D\uFF0C\u8BF7\u957F\u6309\u6587\u672C\u624B\u52A8\u5168\u9009\u3002");
+  });
+  el("clearDiagnostics").addEventListener("click", () => {
+    if (!window.confirm("\u6E05\u7A7A\u6B64\u6D4F\u89C8\u5668\u4FDD\u5B58\u7684\u8BCA\u65AD\u65E5\u5FD7\uFF1F\u4E0D\u4F1A\u5220\u9664\u5DF2\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u9A8C\u8BC1\u7801\u3002")) return;
+    diagnostics.clear();
+    recentMessages.length = 0;
+    text("liveLog", "\u8BCA\u65AD\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002");
+    refreshDiagnostics(true);
+    text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
+  });
+  diagnostics.add("app-start", { ...environment() });
+  refreshDiagnostics(true);
+  render();
+  setInterval(render, 5e3);
+  if (client?.rememberedName && window.isSecureContext) {
+    record("\u5C1D\u8BD5\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\u2026");
+    void client.restore().then((restored) => {
+      if (!restored) record("\u672A\u627E\u5230\u53EF\u6062\u590D\u7684\u8BBE\u5907\uFF0C\u8BF7\u70B9\u51FB\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u624B\u52A8\u8FDE\u63A5\u3002");
+      render();
+    });
+  }
 })();

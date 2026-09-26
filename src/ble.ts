@@ -1,4 +1,5 @@
 import { command, FrameDecoder, syncClock, type ControlAction, type DeviceStatus, type Frame, type Version } from "./protocol";
+import type { DiagnosticLevel, DiagnosticValue } from "./diagnostics";
 
 // Web Bluetooth 在部分 TypeScript DOM 版本中没有类型定义；只声明本项目使用到的 API。
 export interface BleCharacteristic extends EventTarget {
@@ -52,6 +53,7 @@ export class ChargerClient {
   private readonly adapter: BleAdapter;
   private readonly emit: (event: ChargerEvent) => void;
   private readonly enabled: () => boolean;
+  private readonly diagnose: (event: string, data?: Record<string, DiagnosticValue>, level?: DiagnosticLevel) => void;
   private device: BleDevice | null = null;
   private server: BleServer | null = null;
   private writer: BleCharacteristic | null = null;
@@ -68,9 +70,12 @@ export class ChargerClient {
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private fallbackVault: Vault = { lastId: "", devices: {} };
 
-  constructor(adapter: BleAdapter, emit: (event: ChargerEvent) => void, enabled: () => boolean = () => true) {
-    this.adapter = adapter; this.emit = emit; this.enabled = enabled;
-  }
+  constructor(
+    adapter: BleAdapter,
+    emit: (event: ChargerEvent) => void,
+    enabled: () => boolean = () => true,
+    diagnose: (event: string, data?: Record<string, DiagnosticValue>, level?: DiagnosticLevel) => void = () => {}
+  ) { this.adapter = adapter; this.emit = emit; this.enabled = enabled; this.diagnose = diagnose; }
   get currentDevice(): BleDevice | null { return this.device; }
   get currentProtocol(): Version | null { return this.protocol; }
   get currentStatus(): DeviceStatus | null { return this.latest; }
@@ -107,21 +112,29 @@ export class ChargerClient {
   private setPhase(phase: Phase, message: string): void { this.phase = phase; this.emit({ type: "phase", phase, message }); }
   async restore(): Promise<boolean> {
     const id = this.loadVault().lastId;
-    if (!id || !this.adapter.getDevices || !this.enabled()) return false;
+    if (!id || !this.adapter.getDevices || !this.enabled()) {
+      this.diagnose("restore-skipped", { remembered: !!id, getDevices: !!this.adapter.getDevices });
+      return false;
+    }
     try {
+      this.diagnose("restore-search");
       const devices = await this.adapter.getDevices();
       const remembered = devices.find(device => device.id === id);
+      this.diagnose("restore-result", { found: !!remembered, candidates: devices.length });
       if (!remembered || !this.enabled()) return false;
       await this.connect(remembered);
       return true;
     } catch (error) {
+      this.diagnose("restore-error", { kind: error instanceof Error ? error.name : "unknown" }, "warn");
       this.emit({ type: "notice", message: `恢复上次设备失败：${message(error)}；请点击选择设备。` });
       return false;
     }
   }
   async chooseDevice(protocol?: Version): Promise<void> {
     // requestDevice 必须直接从用户点击处理程序发起；此前不得 await。
+    this.diagnose("chooser-open");
     const device = await this.adapter.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+    this.diagnose("chooser-selected", { named: !!device.name });
     if (!this.enabled()) return;
     await this.connect(device, protocol);
   }
@@ -130,17 +143,21 @@ export class ChargerClient {
     this.disconnect();
     const epoch = this.epoch;
     this.device = device;
+    this.diagnose("gatt-connect-start");
     this.setPhase("connecting", `正在连接 ${device.name || "未命名设备"}…`);
     try {
       if (!device.gatt) throw new Error("设备不提供 GATT 服务");
       const server = await device.gatt.connect();
       if (epoch !== this.epoch || !this.enabled()) { if (server.connected) server.disconnect(); return; }
       this.server = server;
+      this.diagnose("gatt-connected");
       device.addEventListener("gattserverdisconnected", this.onDisconnected);
       let notifier: BleCharacteristic | null = null, writer: BleCharacteristic | null = null;
       for (const uuid of SERVICES) {
         let service: BleService;
-        try { service = await this.server.getPrimaryService(uuid); } catch { continue; }
+        try { service = await this.server.getPrimaryService(uuid); }
+        catch { this.diagnose("service-unavailable", { service: uuid.slice(4, 8) }); continue; }
+        this.diagnose("service-found", { service: uuid.slice(4, 8) });
         for (const characteristic of await service.getCharacteristics()) {
           const id = characteristic.uuid.toLowerCase();
           if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) notifier = characteristic;
@@ -148,7 +165,8 @@ export class ChargerClient {
         }
         if (notifier && writer) break;
       }
-      if (!notifier || !writer) throw new Error("找不到旧应用使用的通知/写入特征；请核对充电机型号");
+      this.diagnose("characteristics", { notify: !!notifier, write: !!writer });
+      if (!notifier || !writer) throw new Error("找不到旧应用使用的通知/写入特征；请核对充电桩型号");
       this.writer = writer;
       this.listener = event => {
         const view = (event.target as BleCharacteristic | null)?.value;
@@ -157,6 +175,7 @@ export class ChargerClient {
       notifier.addEventListener("characteristicvaluechanged", this.listener);
       await notifier.startNotifications();
       if (epoch !== this.epoch) return;
+      this.diagnose("notifications-started");
       if (!this.protocol) this.setPhase("detecting", "已连接，等待设备报文以辨识协议…");
       if (!this.protocol && requested) this.chooseProtocol(requested, "用户指定");
       else if (!this.protocol) this.sniffTimer = setTimeout(() => {
@@ -166,6 +185,7 @@ export class ChargerClient {
         else { this.setPhase("password", "没有收到协议报文；请手动选择旧版或新版协议，再输入密码。"); this.emit({ type: "auth-needed", message: "请选协议并输入五位蓝牙验证码。" }); }
       }, 5000);
     } catch (error) {
+      this.diagnose("gatt-connect-error", { kind: error instanceof Error ? error.name : "unknown" }, "error");
       if (epoch === this.epoch) { this.disconnect(); this.emit({ type: "notice", message: `连接失败：${message(error)}` }); }
       throw error;
     }
@@ -176,10 +196,12 @@ export class ChargerClient {
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
     this.sniffTimer = null;
     this.protocol = version;
+    this.diagnose("protocol-selected", { version, source });
     this.emit({ type: "protocol", version, source });
     if (this.autoLoginTried) return;
     const saved = this.loadVault().devices[this.device!.id];
     if (saved?.password && /^\d{5}$/.test(saved.password)) {
+      this.diagnose("auth-cached-available");
       this.autoLoginTried = true;
       void this.login(saved.password, true).catch(error => {
         this.forgetPassword();
@@ -195,24 +217,26 @@ export class ChargerClient {
     if (!this.writer || !this.protocol || !this.server?.connected || !this.device) throw new Error("请先连接设备并识别协议");
     if (this.pendingAuth) throw new Error("正在等待上一次授权的设备回复");
     const frame = command(this.protocol, "auth", password);
+    this.diagnose("auth-request", { version: this.protocol, remember });
     this.setPhase("authenticating", "正在发送验证码，等待设备确认…");
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.rejectAuth(new Error("授权超时，不能确认设备是否接受密码")), 9000);
       this.pendingAuth = { resolve, reject, timer, password, remember };
-      void this.write(frame).catch(error => this.rejectAuth(new Error(`发送授权报文失败：${message(error)}`)));
+      void this.write(frame, "auth").catch(error => this.rejectAuth(new Error(`发送授权报文失败：${message(error)}`)));
     });
   }
   private rejectAuth(error: Error): void {
     if (!this.pendingAuth) return;
     const pending = this.pendingAuth;
     this.pendingAuth = null; clearTimeout(pending.timer);
+    this.diagnose("auth-unconfirmed", { connected: !!this.server?.connected }, "warn");
     if (this.server?.connected) this.setPhase("password", error.message);
     pending.reject(error);
   }
   async refresh(): Promise<void> {
     if (!this.authorized || !this.protocol) throw new Error("请先通过设备授权");
     // 旧应用使用同步设备时钟的帧触发状态更新；它不是无副作用的读取操作。
-    await this.write(syncClock(this.protocol));
+    await this.write(syncClock(this.protocol), "clock-sync");
     this.emit({ type: "notice", message: "已发送设备时钟同步帧，等待状态通知。" });
   }
   control(action: ControlAction): Promise<void> {
@@ -223,31 +247,38 @@ export class ChargerClient {
     if (action === "stop" && s.state !== "4") throw new Error("只有充电中才能停止");
     if (action === "unlock" && (s.state === "4" || s.mode === "3" || s.lock === "0")) throw new Error("充电中、预约模式或已解锁时不能执行解锁");
     const frame = command(this.protocol, action);
+    this.diagnose("control-request", { action, state: s.state });
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.rejectControl(new Error("设备未返回确认状态；实际状态未知，请刷新核对，勿直接重试")), 10000);
       this.pendingControl = { action, resolve, reject, timer };
-      void this.write(frame).catch(error => this.rejectControl(new Error(`发送指令失败：${message(error)}`)));
+      void this.write(frame, action).catch(error => this.rejectControl(new Error(`发送指令失败：${message(error)}`)));
     });
   }
   private rejectControl(error: Error): void {
     if (!this.pendingControl) return;
     const pending = this.pendingControl;
     this.pendingControl = null; clearTimeout(pending.timer);
+    this.diagnose("control-unconfirmed", { action: pending.action }, "warn");
     pending.reject(error);
   }
   private confirmControl(): void {
     if (!this.pendingControl) return;
     const pending = this.pendingControl;
     this.pendingControl = null; clearTimeout(pending.timer);
+    this.diagnose("control-confirmed", { action: pending.action });
     pending.resolve();
   }
   private onBytes(view: DataView): void {
-    for (const frame of this.decoder.feed(decodeAscii(view))) this.onFrame(frame);
+    const frames = this.decoder.feed(decodeAscii(view));
+    this.diagnose("rx-notification", { bytes: view.byteLength, frames: frames.length });
+    for (const frame of frames) this.onFrame(frame);
   }
   private onFrame(frame: Frame): void {
+    this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
     if (!this.protocol) this.chooseProtocol(frame.protocol, "设备通知");
     if (frame.protocol !== this.protocol) { this.emit({ type: "notice", message: "收到另一种协议的报文；已忽略，不会自动切换授权协议。" }); return; }
     if (frame.type === "auth" && this.pendingAuth) {
+      this.diagnose("auth-reply", { accepted: frame.ok });
       if (!frame.ok) { this.rejectAuth(new Error("设备拒绝蓝牙验证码")); return; }
       const pending = this.pendingAuth;
       this.pendingAuth = null; clearTimeout(pending.timer);
@@ -262,27 +293,36 @@ export class ChargerClient {
       return;
     }
     if (frame.type === "status" && this.authorized) {
+      this.diagnose("status", { state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock });
       this.latest = frame; this.latestAt = Date.now();
       this.emit({ type: "status", status: frame });
       const action = this.pendingControl?.action;
       if (action === "start" && frame.state === "4" || action === "stop" && frame.state === "2" || action === "unlock" && frame.lock === "0") this.confirmControl();
     }
     if (frame.type === "ack" && this.pendingControl?.action === frame.action) {
+      this.diagnose("control-ack", { action: frame.action, accepted: frame.ok });
       if (!frame.ok) this.rejectControl(new Error("设备拒绝该充电操作"));
       else this.emit({ type: "notice", message: "设备已接收操作，等待状态变化再确认完成。" });
     }
   }
-  private async write(text: string): Promise<void> {
+  private async write(text: string, action: "auth" | "clock-sync" | ControlAction): Promise<void> {
     if (!this.enabled()) throw new Error("真机控制模式已关闭，不发送蓝牙指令");
     const writer = this.writer;
     if (!writer || !this.server?.connected) throw new Error("蓝牙连接已断开");
     const bytes = encodeAscii(text);
-    if (writer.properties.write && writer.writeValueWithResponse) await writer.writeValueWithResponse(bytes);
-    else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) await writer.writeValueWithoutResponse(bytes);
-    else if (writer.writeValue) await writer.writeValue(bytes);
-    else throw new Error("该设备特征不可写");
+    this.diagnose("tx-attempt", { action, bytes: bytes.length });
+    try {
+      if (writer.properties.write && writer.writeValueWithResponse) await writer.writeValueWithResponse(bytes);
+      else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) await writer.writeValueWithoutResponse(bytes);
+      else if (writer.writeValue) await writer.writeValue(bytes);
+      else throw new Error("该设备特征不可写");
+      this.diagnose("tx-written", { action });
+    } catch (error) {
+      this.diagnose("tx-error", { action, kind: error instanceof Error ? error.name : "unknown" }, "error");
+      throw error;
+    }
   }
-  private readonly onDisconnected = (): void => { this.disconnect(); this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" }); };
+  private readonly onDisconnected = (): void => { this.diagnose("unexpected-disconnect", {}, "warn"); this.disconnect(); this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" }); };
   disconnect(): void {
     this.epoch++;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
@@ -290,11 +330,12 @@ export class ChargerClient {
     this.rejectAuth(new Error("蓝牙连接已断开"));
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"));
     const server = this.server;
+    if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
     this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
     this.device = null; this.server = null; this.writer = null; this.listener = null;
     try { if (server?.connected) server.disconnect(); } catch { /* 连接可能已自行断开 */ }
     this.protocol = null; this.latest = null; this.latestAt = 0;
     this.autoLoginTried = false; this.decoder.reset();
-    this.setPhase("offline", "未连接充电机");
+    this.setPhase("offline", "未连接充电桩");
   }
 }

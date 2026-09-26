@@ -1,4 +1,5 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
+import { Diagnostics, type DiagnosticEnvironment } from "./diagnostics";
 import type { ControlAction, DeviceStatus, Version } from "./protocol";
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -8,12 +9,25 @@ function el<T extends HTMLElement = HTMLElement>(id: string): T {
 }
 const text = (id: string, value: string): void => { el(id).textContent = value; };
 const adapter = (navigator as Navigator & { bluetooth?: BleAdapter }).bluetooth;
-let realMode = false;
-const client = adapter ? new ChargerClient(adapter, handleEvent, () => realMode) : null;
+const diagnostics = new Diagnostics();
+const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
+  diagnostics.add(event, data, level);
+  refreshDiagnostics();
+}) : null;
 let phase = "offline";
 let busy = false;
 let statusAt = 0;
-const log: string[] = [];
+const recentMessages: string[] = [];
+function environment(): DiagnosticEnvironment {
+  const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" :
+    ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
+  return { secureContext: window.isSecureContext, webBluetooth: !!adapter, getDevices: !!adapter?.getDevices, scheme };
+}
+function refreshDiagnostics(force = false): void {
+  const area = el<HTMLTextAreaElement>("diagnosticsText");
+  if (force || document.activeElement !== area) area.value = diagnostics.exportText(environment());
+  if (!diagnostics.storageAvailable) text("diagnosticsHint", "浏览器未允许本地保存；关闭页面后日志可能丢失。请先复制上方文本。");
+}
 const stateName = (status: DeviceStatus | null): string => {
   if (!status) return "等候设备实时状态";
   if (status.state === "4") return "充电中";
@@ -22,16 +36,25 @@ const stateName = (status: DeviceStatus | null): string => {
   return `设备状态 ${status.state || "未知"}（含义未核实）`;
 };
 function record(message: string): void {
-  log.unshift(message);
-  if (log.length > 6) log.length = 6;
-  text("liveLog", log.join("\n"));
+  // 页面短暂展示用户反馈；不把自由文本写进可导出的诊断日志，避免设备名混入日志。
+  recentMessages.unshift(message);
+  if (recentMessages.length > 6) recentMessages.length = 6;
+  text("liveLog", recentMessages.join("\n"));
+}
+function errorKind(error: unknown): string { return error instanceof Error ? error.name : "unknown"; }
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function failure(action: string, error: unknown): void {
+  diagnostics.add("ui-error", { action, kind: errorKind(error) }, "error");
+  refreshDiagnostics();
+  record(`${action}失败：${errorMessage(error)}`);
 }
 function handleEvent(event: ChargerEvent): void {
-  if (event.type === "phase") { phase = event.phase; record(event.message); }
+  if (event.type === "phase") { phase = event.phase; diagnostics.add("phase", { phase }); record(event.message); }
   if (event.type === "notice") record(event.message);
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") { statusAt = Date.now(); record("收到设备状态通知。"); }
+  refreshDiagnostics();
   render();
 }
 function render(): void {
@@ -66,57 +89,37 @@ function selectedProtocol(): Version | undefined {
   const value = el<HTMLSelectElement>("liveProtocol").value;
   return value === "1" ? 1 : value === "2" ? 2 : undefined;
 }
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function switchMode(real: boolean): void {
-  const wasReal = realMode;
-  realMode = real;
-  if (!real && wasReal) { client?.disconnect(); statusAt = 0; }
-  el("reviewPanel").hidden = real;
-  el("demoWorkspace").hidden = real;
-  el("liveWorkspace").hidden = !real;
-  el("appLayout").classList.toggle("live-mode", real);
-  text("modeBadge", real ? "真机模式 · 指令会发送到设备" : "模拟评审 · 不发送指令");
-  el<HTMLButtonElement>("showDemo").setAttribute("aria-pressed", String(!real));
-  el<HTMLButtonElement>("showLive").setAttribute("aria-pressed", String(real));
-  render();
-  if (real && !wasReal && client?.rememberedName) {
-    record(`上次设备：${client.rememberedName}；尝试恢复浏览器授权…`);
-    void client.restore().then(restored => { if (!restored) record("浏览器未提供可恢复的设备，请点击「选择设备」手动连接。"); render(); });
-  }
-}
-el("showDemo").addEventListener("click", () => switchMode(false));
-el("showLive").addEventListener("click", () => switchMode(true));
 el("liveChoose").addEventListener("click", () => {
   if (!client) return;
-  // 保持浏览器设备选择器与用户点击同一任务栈。
-  void client.chooseDevice(selectedProtocol()).catch(error => { record(`选择/连接失败：${errorMessage(error)}`); render(); });
+  // 设备选择器必须从点击事件直接调用。
+  void client.chooseDevice(selectedProtocol()).catch(error => failure("选择/连接", error));
 });
 el("liveProtocol").addEventListener("change", () => {
   const version = selectedProtocol();
   if (!version || !client?.currentDevice || client.authorized) return;
-  try { client.chooseProtocol(version); } catch (error) { record(errorMessage(error)); }
+  try { client.chooseProtocol(version); } catch (error) { failure("切换协议", error); }
   render();
 });
 el("liveAuthorize").addEventListener("click", () => {
   if (!client) return;
   const input = el<HTMLInputElement>("livePassword");
   const password = input.value;
-  if (!/^\d{5}$/.test(password)) { record("蓝牙验证码必须是五位数字。"); return; }
+  if (!/^\d{5}$/.test(password)) { diagnostics.add("auth-input-invalid"); record("蓝牙验证码必须是五位数字。"); return; }
   input.value = "";
   const remember = el<HTMLInputElement>("rememberPassword").checked;
-  void client.login(password, remember).catch(error => record(`授权失败：${errorMessage(error)}`));
+  void client.login(password, remember).catch(error => failure("授权", error));
 });
 el("liveRefresh").addEventListener("click", () => {
-  if (!client || !window.confirm("将向充电机发送旧应用使用的“同步设备时钟”指令，并等待状态通知。继续吗？")) return;
-  void client.refresh().catch(error => record(`同步失败：${errorMessage(error)}`));
+  if (!client || !window.confirm("将向充电桩发送旧应用使用的“同步设备时钟”指令，并等待状态通知。继续吗？")) return;
+  void client.refresh().catch(error => failure("同步状态", error));
 });
 async function control(action: ControlAction): Promise<void> {
   if (!client) return;
   const name = { start: "开始充电", stop: "停止充电", unlock: "解除电子锁" }[action];
-  if (!window.confirm(`确定向真实充电机发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) return;
+  if (!window.confirm(`确定向真实充电桩发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) return;
   busy = true; render(); record(`正在发送「${name}」并等待设备确认…`);
   try { await client.control(action); record(`设备状态已确认：${name}。`); }
-  catch (error) { record(`${name}未确认：${errorMessage(error)}`); }
+  catch (error) { failure(name, error); }
   finally { busy = false; render(); }
 }
 for (const [id, action] of [["liveStart", "start"], ["liveStop", "stop"], ["liveUnlock", "unlock"]] as const) {
@@ -125,11 +128,46 @@ for (const [id, action] of [["liveStart", "start"], ["liveStop", "stop"], ["live
 el("liveDisconnect").addEventListener("click", () => { client?.disconnect(); statusAt = 0; render(); });
 el("liveForgetPassword").addEventListener("click", () => {
   if (!window.confirm("删除本网站保存的蓝牙验证码？下次需重新输入。")) return;
-  client?.forgetPassword(); record("已删除保存的验证码。"); render();
+  client?.forgetPassword(); diagnostics.add("password-forgotten"); record("已删除保存的验证码。"); render();
 });
 el("liveForgetDevice").addEventListener("click", () => {
   if (!window.confirm("清除本网站保存的全部设备记录和验证码，并断开连接？")) return;
-  client?.forgetDevice(); statusAt = 0; render();
+  client?.forgetDevice(); statusAt = 0; diagnostics.add("device-records-forgotten"); render();
 });
-switchMode(!!adapter && window.isSecureContext);
-setInterval(() => { if (!el("liveWorkspace").hidden) render(); }, 5000);
+el("copyDiagnostics").addEventListener("click", async () => {
+  const value = diagnostics.exportText(environment());
+  const area = el<HTMLTextAreaElement>("diagnosticsText");
+  area.value = value;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(value);
+    text("diagnosticsHint", "日志已复制。贴出之前建议检查文本内容。");
+    diagnostics.add("log-copied", { method: "clipboard" });
+  } catch {
+    area.focus(); area.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch { /* Bluefy 可能禁止自动复制 */ }
+    text("diagnosticsHint", copied ? "日志已复制（兼容方式）。" : "浏览器禁止自动复制；请长按上方文本，全选后手动复制。");
+    diagnostics.add("log-copy-fallback", { copied }, copied ? "info" : "warn");
+  }
+});
+el("selectDiagnostics").addEventListener("click", () => {
+  const area = el<HTMLTextAreaElement>("diagnosticsText");
+  area.value = diagnostics.exportText(environment());
+  area.focus(); area.select();
+  text("diagnosticsHint", "已选中日志；可以使用浏览器复制菜单。若未选中，请长按文本手动全选。");
+});
+el("clearDiagnostics").addEventListener("click", () => {
+  if (!window.confirm("清空此浏览器保存的诊断日志？不会删除已保存的设备和验证码。")) return;
+  diagnostics.clear(); recentMessages.length = 0; text("liveLog", "诊断日志已清空。");
+  refreshDiagnostics(true);
+  text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
+});
+diagnostics.add("app-start", { ...environment() });
+refreshDiagnostics(true);
+render();
+setInterval(render, 5000);
+if (client?.rememberedName && window.isSecureContext) {
+  record("尝试恢复上次设备的浏览器授权…");
+  void client.restore().then(restored => { if (!restored) record("未找到可恢复的设备，请点击「选择 / 更换设备」手动连接。"); render(); });
+}

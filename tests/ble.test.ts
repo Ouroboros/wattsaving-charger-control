@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChargerClient, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer } from "../src/ble";
+import { Diagnostics } from "../src/diagnostics";
 
 class MemoryStorage {
   private values = new Map<string,string>();
@@ -106,7 +107,7 @@ test("密码不会发给另一台设备；设备拒绝缓存密码则删除并�
   assert.equal(first.writer.sent.filter(frame => frame.includes("54321")).length, 2);
   again.disconnect();
 });
-test("切换回模拟模式时，不继续连接或发送任何真实蓝牙指令", async () => {
+test("点击后控制入口被禁用时，不继续连接或发送蓝牙指令", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("C");
   let enabled = true;
@@ -117,4 +118,18 @@ test("切换回模拟模式时，不继续连接或发送任何真实蓝牙指�
   assert.equal(device.gatt.connected, false);
   assert.equal(device.writer.sent.length, 0);
   assert.equal(client.currentDevice, null);
+});
+test("真实 BLE 生命周期日志覆盖授权、控制与回执且不输出密码或设备标识", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  await client.login("98765", true); await tick();
+  await client.control("start");
+  client.disconnect();
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const event of ["chooser-open", "gatt-connected", "service-found", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
+  for (const secret of ["98765", "private-device-id", "测试设备", "@%PD-100"]) assert.equal(output.includes(secret), false);
 });
