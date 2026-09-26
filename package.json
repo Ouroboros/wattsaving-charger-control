@@ -1,0 +1,15 @@
+{
+  "name": "wattsaving-charger-control",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Personal Bluefy Web Bluetooth charger controller",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=iife --target=es2020 --outfile=app.js",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && esbuild tests/*.test.ts --bundle --platform=node --format=cjs --outdir=.test-dist && node --test .test-dist/*.test.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
