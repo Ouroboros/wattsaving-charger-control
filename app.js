@@ -39,6 +39,33 @@
     }
     return commands[protocol][action];
   }
+  function adminCommand(protocol, action, password) {
+    const needsValue = action === "admin-auth" || action === "bluetooth-password" || action === "admin-password";
+    if (needsValue && !/^\d{5}$/.test(password ?? "")) throw new Error("\u7BA1\u7406\u5458\u9A8C\u8BC1\u6216\u65B0\u5BC6\u7801\u987B\u4E3A\u4E94\u4F4D\u6570\u5B57");
+    if (action !== "admin-auth" && needsValue && Number(password) > 65535) throw new Error("\u65B0\u5BC6\u7801\u4E0D\u80FD\u5927\u4E8E 65535");
+    if (!needsValue && password !== void 0) throw new Error("\u6B64\u7BA1\u7406\u64CD\u4F5C\u4E0D\u5F97\u643A\u5E26\u5BC6\u7801");
+    if (protocol === 1) {
+      if (["mute-on", "mute-off", "pair"].includes(action)) throw new Error("\u65E7\u7248\u534F\u8BAE\u6CA1\u6709\u6B64\u7BA1\u7406\u529F\u80FD");
+      if (needsValue) {
+        const selector2 = action === "admin-auth" ? "1" : action === "bluetooth-password" ? "2" : "4";
+        return appendChecksum(`8010${selector2}000${password}000006`);
+      }
+      const selector = action === "plug-on" ? "8" : "9";
+      return appendChecksum(`801${selector}6${"0".repeat(13)}6`);
+    }
+    const codes = {
+      "admin-auth": "120",
+      "plug-on": "110",
+      "plug-off": "112",
+      "mute-on": "202",
+      "mute-off": "202",
+      "pair": "136",
+      "bluetooth-password": "118",
+      "admin-password": "132"
+    };
+    const value = action === "mute-on" || action === "pair" ? "1" : action === "mute-off" ? "0" : needsValue ? password : "@";
+    return action === "plug-on" || action === "plug-off" ? `@%PD-${codes[action]}-0-181-@` : `@%PD-${codes[action]}-0-181-${value}-@`;
+  }
   function syncClock(protocol, date = /* @__PURE__ */ new Date()) {
     const parts = [...calendar(date), pad(date.getSeconds())];
     return protocol === 1 ? appendChecksum(`821${parts.join("")}06`) : `@%PD-204-0-181-${parts.join("-")}-@`;
@@ -101,6 +128,8 @@
     if (code === "101") return { type: "auth", protocol: 2, ok: parts[4] === "1", code: parts[4] ?? "" };
     if (code === "103" || code === "105") return { type: "ack", protocol: 2, action: code === "103" ? "start" : "stop", ok: parts[4] === "1", code: parts[4] ?? "" };
     if ((code === "115" || code === "117") && (parts[4] === "0" || parts[4] === "1")) return { type: "reservation", protocol: 2, action: code === "115" ? "submit" : "cancel", ok: parts[4] === "1", code: parts[4] };
+    const adminCodes = { "121": "admin-auth", "111": "plug-on", "113": "plug-off", "119": "bluetooth-password", "133": "admin-password", "203": "mute", "137": "pair" };
+    if (adminCodes[code] && (parts[4] === "0" || parts[4] === "1")) return { type: "admin", protocol: 2, action: adminCodes[code], ok: parts[4] === "1", code: parts[4] };
     if (code === "107") return status(2, parts.slice(4, 17));
     return { type: "unknown", protocol: 2, code: code ?? "" };
   }
@@ -114,7 +143,20 @@
       return { type: "auth", protocol: 1, ok: code === "33", code };
     }
     if (header === "88" && first[1] + second[1] === "88" && trailer === "66") {
-      const kind = first[3] + second[3], code = first[5] + second[5];
+      const kind = first[3] + second[3];
+      const adminKinds = {
+        "44": ["admin-auth", 7],
+        "55": ["bluetooth-password", 8],
+        "66": ["plug-on", 9],
+        "77": ["plug-off", 10],
+        "88": ["admin-password", 11]
+      };
+      const admin = adminKinds[kind];
+      if (admin) {
+        const response = first[admin[1]] + second[admin[1]];
+        return { type: "admin", protocol: 1, action: admin[0], ok: response === "33" && kind === "44" || response === "22" && kind !== "44", code: response };
+      }
+      const code = first[5] + second[5];
       if (kind === "22" && ["55", "66"].includes(code)) return { type: "reservation", protocol: 1, action: "submit", ok: code === "55", code };
       if (kind === "33" && ["77", "88"].includes(code)) return { type: "reservation", protocol: 1, action: "cancel", ok: code === "77", code };
     }
@@ -256,11 +298,13 @@
 
   // src/ble.ts
   var KEY2 = "wattsaving-ble-devices-v1";
+  var AUTH_MODE_KEY = "wattsaving-auth-always-ask-v1";
   var UUID = (short) => `0000${short}-0000-1000-8000-00805f9b34fb`;
   var SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
   var NOTIFY_SERVICES = /* @__PURE__ */ new Set(["ff00", "ffe0"]);
   var WRITE_SERVICES = /* @__PURE__ */ new Set(["ff00", "ffe5"]);
   var NOTIFY = /* @__PURE__ */ new Set([UUID("ff01"), UUID("ffe4")]);
+  var PAIR_NOTIFY = UUID("ff03");
   var WRITE = /* @__PURE__ */ new Set([UUID("ff02"), UUID("ffe9")]);
   var ConnectionInterruptedError = class extends Error {
     constructor() {
@@ -329,6 +373,7 @@
       __publicField(this, "server", null);
       __publicField(this, "writer", null);
       __publicField(this, "notifier", null);
+      __publicField(this, "pairingNotifier", null);
       __publicField(this, "listener", null);
       __publicField(this, "decoder", new FrameDecoder());
       __publicField(this, "rxNotifications", 0);
@@ -356,6 +401,8 @@
       __publicField(this, "pendingAuth", null);
       __publicField(this, "pendingControl", null);
       __publicField(this, "pendingReservation", null);
+      __publicField(this, "pendingAdmin", null);
+      __publicField(this, "adminVerified", false);
       __publicField(this, "reservationAccepted", null);
       __publicField(this, "fallbackVault", { lastId: "", devices: {} });
       __publicField(this, "onDisconnected", () => {
@@ -371,6 +418,7 @@
           pendingAuth: !!this.pendingAuth,
           pendingControl: !!this.pendingControl,
           pendingReservation: !!this.pendingReservation,
+          pendingAdmin: !!this.pendingAdmin,
           notifications: this.rxNotifications
         }, "warn");
         this.diagnose("disconnect-rx-summary", {
@@ -381,7 +429,7 @@
           unknown: this.unknownFrames,
           statuses: this.statusFrames
         });
-        const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation);
+        const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin);
         const chooserStillConnecting = this.connectionSource === "chooser" && this.phase === "connecting";
         this.disconnect("gatt-event");
         this.emit({
@@ -412,6 +460,30 @@
     }
     get reservationPending() {
       return !!this.pendingReservation;
+    }
+    get adminPending() {
+      return !!this.pendingAdmin;
+    }
+    get administratorAuthorized() {
+      return this.authorized && this.adminVerified;
+    }
+    get pairingAvailable() {
+      return this.protocol === 2 && !!this.pairingNotifier;
+    }
+    get manualBluetoothLogin() {
+      try {
+        return localStorage.getItem(AUTH_MODE_KEY) === "1";
+      } catch {
+        return false;
+      }
+    }
+    setManualBluetoothLogin(value) {
+      try {
+        if (value) localStorage.setItem(AUTH_MODE_KEY, "1");
+        else localStorage.removeItem(AUTH_MODE_KEY);
+      } catch {
+        throw new Error("\u6D4F\u89C8\u5668\u62D2\u7EDD\u4FDD\u5B58\u8BA4\u8BC1\u65B9\u5F0F");
+      }
     }
     get canCancelReservation() {
       return this.reservationAccepted === null ? this.latest?.mode === "3" : this.reservationAccepted;
@@ -479,6 +551,10 @@
       this.lastObserved = null;
       this.recentDevice = null;
       this.storeVault({ lastId: "", devices: {} });
+      try {
+        localStorage.removeItem(AUTH_MODE_KEY);
+      } catch {
+      }
       this.emit({ type: "notice", message: "\u5DF2\u6E05\u9664\u8BE5\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
     }
     setPhase(phase2, message2) {
@@ -596,7 +672,7 @@
           throw new ConnectionInterruptedError();
         };
         ensureActive("before-services");
-        let notifier = null, writer = null;
+        let notifier = null, writer = null, pairingNotifier = null;
         let notifyService = "none", writeService = "none";
         let servicesFound = 0, missingServices = 0, failedServices = 0;
         for (const uuid of SERVICES) {
@@ -710,11 +786,12 @@
               writer = characteristic;
               writeService = serviceCode;
             }
+            if (serviceCode === "ff00" && id === PAIR_NOTIFY && (properties?.notify || properties?.indicate)) pairingNotifier = characteristic;
           }
           if (notifier && writer) break;
         }
         ensureActive("complete-discovery");
-        this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer });
+        this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer, pairingNotify: !!pairingNotifier });
         this.diagnose("characteristics", {
           notify: !!notifier,
           write: !!writer,
@@ -729,6 +806,7 @@
           throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
         }
         this.writer = writer;
+        this.pairingNotifier = pairingNotifier;
         this.listener = (event) => {
           const view = event.target?.value;
           if (view && epoch === this.epoch) this.onBytes(view);
@@ -801,7 +879,7 @@
       this.emit({ type: "protocol", version, source });
       if (this.autoLoginTried) return;
       const saved = this.loadVault().devices[this.device.id];
-      if (saved?.password && /^\d{5}$/.test(saved.password)) {
+      if (!this.manualBluetoothLogin && saved?.password && /^\d{5}$/.test(saved.password)) {
         this.diagnose("auth-gate", { stage: "cached-password" });
         this.diagnose("auth-cached-available");
         this.autoLoginTried = true;
@@ -848,13 +926,13 @@
     }
     async refresh() {
       if (!this.authorized || !this.protocol) throw new Error("\u8BF7\u5148\u901A\u8FC7\u8BBE\u5907\u6388\u6743");
-      if (this.pendingReservation) throw new Error("\u6B63\u5728\u7B49\u5F85\u9884\u7EA6\u56DE\u6267\uFF0C\u8BF7\u52FF\u540C\u65F6\u53D1\u9001\u540C\u6B65\u6307\u4EE4");
+      if (this.pendingReservation || this.pendingAdmin) throw new Error("\u6B63\u5728\u7B49\u5F85\u8BBE\u5907\u7BA1\u7406\u6216\u9884\u7EA6\u56DE\u6267\uFF0C\u8BF7\u52FF\u540C\u65F6\u53D1\u9001\u540C\u6B65\u6307\u4EE4");
       await this.write(syncClock(this.protocol), "clock-sync");
       this.emit({ type: "notice", message: "\u5DF2\u53D1\u9001\u8BBE\u5907\u65F6\u949F\u540C\u6B65\u5E27\uFF0C\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002" });
     }
     control(action) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
-      if (this.pendingControl || this.pendingReservation) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const s = this.latest;
       if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("\u8BBE\u5907\u5F53\u524D\u4E0D\u6EE1\u8DB3\u542F\u52A8\u6761\u4EF6\uFF1A\u9700\u5C31\u7EEA\u3001\u63D2\u67AA\u3001\u65E0\u9884\u7EA6\u6216\u5373\u63D2\u5373\u5145\u51B2\u7A81");
       if (action === "stop" && s.state !== "4") throw new Error("\u53EA\u6709\u5145\u7535\u4E2D\u624D\u80FD\u505C\u6B62");
@@ -867,6 +945,31 @@
         void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
     }
+    admin(action, password) {
+      if (!this.authorized || !this.protocol || !this.device) throw new Error("\u8BF7\u5148\u8FDE\u63A5\u5E76\u901A\u8FC7\u8BBE\u5907\u84DD\u7259\u6388\u6743");
+      if (action !== "admin-auth" && !this.adminVerified) throw new Error("\u8BF7\u5148\u4F7F\u7528\u72EC\u7ACB\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\u53D6\u5F97\u8BBE\u5907\u786E\u8BA4");
+      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
+      if (action !== "admin-auth" && (!this.latest || Date.now() - this.latestAt > 2e4)) throw new Error("\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF1B\u7BA1\u7406\u64CD\u4F5C\u9700\u8981\u6700\u65B0\u8BBE\u5907\u72B6\u6001");
+      const status2 = this.latest;
+      if (action === "plug-on" && (status2?.mode === "3" || status2?.mode === "5")) throw new Error("\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u6216\u65E0\u611F\u5145\u7535\u6A21\u5F0F");
+      if (action === "pair" && (status2?.mode === "3" || status2?.selfStartFlag === "2")) throw new Error("\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u6216\u5373\u63D2\u5373\u5145\u6A21\u5F0F");
+      if (action === "pair" && !this.pairingNotifier) throw new Error("\u672A\u53D1\u73B0\u539F\u5C0F\u7A0B\u5E8F\u914D\u5BF9\u6240\u9700\u7684 FF03 \u901A\u77E5\u7279\u5F81\uFF1B\u4E0D\u80FD\u542F\u52A8\u65E0\u611F\u914D\u5BF9");
+      const frame = adminCommand(this.protocol, action, password);
+      this.diagnose("admin-request", { action, version: this.protocol });
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => this.rejectAdmin(new Error("\u8BBE\u5907\u7BA1\u7406\u56DE\u6267\u8D85\u65F6\uFF0C\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u6838\u5BF9\u72B6\u6001\u540E\u518D\u64CD\u4F5C"), "timeout"), 1e4);
+        this.pendingAdmin = { action, resolve, reject, timer };
+        void this.write(frame, action).catch((error) => this.rejectAdmin(new Error(`\u53D1\u9001\u7BA1\u7406\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
+      });
+    }
+    rejectAdmin(error, reason = "unknown") {
+      const pending = this.pendingAdmin;
+      if (!pending) return;
+      this.pendingAdmin = null;
+      clearTimeout(pending.timer);
+      this.diagnose("admin-unconfirmed", { action: pending.action, reason }, "warn");
+      pending.reject(error);
+    }
     submitReservation(reservation) {
       return this.reserve("submit", reservation);
     }
@@ -875,7 +978,7 @@
     }
     reserve(action, reservation) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
-      if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const status2 = this.latest;
       if (action === "submit") {
         const blocked = reservationBlockReason(status2);
@@ -973,6 +1076,34 @@
         this.setPhase("ready", "\u8BBE\u5907\u786E\u8BA4\u6388\u6743\u6210\u529F\uFF1B\u53EF\u4EE5\u8BFB\u53D6\u72B6\u6001\u5E76\u63A7\u5236\u3002");
         pending.resolve();
         void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}`, severity: "error" }));
+        return;
+      }
+      if (frame.type === "admin") {
+        const pending = this.pendingAdmin;
+        const matched = !!pending && (frame.action === pending.action || frame.action === "mute" && (pending.action === "mute-on" || pending.action === "mute-off"));
+        this.diagnose("admin-reply", { action: frame.action, accepted: frame.ok, matched });
+        if (!matched || !pending) return;
+        if (pending.action === "pair" && frame.ok && this.pairingNotifier) {
+          const epoch = this.epoch;
+          void this.pairingNotifier.startNotifications().then(() => {
+            if (this.pendingAdmin !== pending) return;
+            this.pendingAdmin = null;
+            clearTimeout(pending.timer);
+            if (this.epoch === epoch && this.authorized) pending.resolve();
+            else pending.reject(new Error("\u914D\u5BF9\u901A\u77E5\u5EFA\u7ACB\u671F\u95F4\u84DD\u7259\u5DF2\u65AD\u7EBF\uFF1B\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
+          }, (error) => this.rejectAdmin(new Error(`\u8BBE\u5907\u5DF2\u6253\u5F00\u914D\u5BF9\u7A97\u53E3\uFF0C\u4F46\u65E0\u6CD5\u8BA2\u9605\u914D\u5BF9\u901A\u77E5\uFF1A${message(error)}`), "pair-notify-error"));
+          return;
+        }
+        this.pendingAdmin = null;
+        clearTimeout(pending.timer);
+        if (!frame.ok) {
+          pending.reject(new Error("\u8BBE\u5907\u62D2\u7EDD\u7BA1\u7406\u5458\u9A8C\u8BC1\u6216\u8BBE\u7F6E"));
+          return;
+        }
+        if (pending.action === "admin-auth") this.adminVerified = true;
+        if (pending.action === "admin-password") this.adminVerified = false;
+        if (pending.action === "bluetooth-password") this.forgetPassword();
+        pending.resolve();
         return;
       }
       if (frame.type === "reservation") {
@@ -1078,7 +1209,8 @@
         ...this.statusTrace(),
         pendingAuth: !!this.pendingAuth,
         pendingControl: !!this.pendingControl,
-        pendingReservation: !!this.pendingReservation
+        pendingReservation: !!this.pendingReservation,
+        pendingAdmin: !!this.pendingAdmin
       };
       this.epoch++;
       this.autoLoginInProgress = false;
@@ -1087,6 +1219,8 @@
       this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"), "disconnect");
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
+      this.rejectAdmin(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u7BA1\u7406\u64CD\u4F5C\u7ED3\u679C\u672A\u77E5"), "disconnect");
+      this.adminVerified = false;
       const server = this.server;
       if (this.device || server) this.diagnose("disconnect", {
         reason,
@@ -1101,6 +1235,7 @@
       this.server = null;
       this.writer = null;
       this.notifier = null;
+      this.pairingNotifier = null;
       this.listener = null;
       if (server?.connected) {
         this.diagnose("gatt-disconnect-call", { reason, stage: this.connectionStage });
@@ -1182,6 +1317,127 @@
     }
   };
 
+  // src/history.ts
+  var KEY3 = "wattsaving-local-history-v1";
+  var LIMIT = 100;
+  var empty = () => ({ charges: [], reservations: [] });
+  var finiteTime = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
+  var deviceRecord = (v) => !!v && typeof v === "object" && typeof v.id === "string" && typeof v.deviceId === "string";
+  var LocalHistory = class {
+    constructor(storage) {
+      this.storage = storage;
+      __publicField(this, "data", empty());
+      __publicField(this, "lastLive", /* @__PURE__ */ new Map());
+      __publicField(this, "available");
+      let available = !!storage;
+      try {
+        const raw = storage?.getItem(KEY3);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object") {
+            const obj = parsed;
+            this.data.charges = Array.isArray(obj.charges) ? obj.charges.filter(deviceRecord).slice(0, LIMIT) : [];
+            this.data.reservations = Array.isArray(obj.reservations) ? obj.reservations.filter(deviceRecord).slice(0, LIMIT) : [];
+          }
+        }
+      } catch {
+        available = false;
+        this.data = empty();
+      }
+      this.available = available;
+    }
+    save() {
+      try {
+        this.storage?.setItem(KEY3, JSON.stringify(this.data));
+      } catch {
+      }
+    }
+    charges(deviceId) {
+      return this.data.charges.filter((r) => r.deviceId === deviceId);
+    }
+    reservations(deviceId) {
+      return this.data.reservations.filter((r) => r.deviceId === deviceId);
+    }
+    latestDeviceId() {
+      const charge = this.data.charges[0], reservation = this.data.reservations[0];
+      return !charge ? reservation?.deviceId || null : !reservation || charge.firstSeenAt >= reservation.submittedAt ? charge.deviceId : reservation.deviceId;
+    }
+    latestReservation(deviceId) {
+      return this.reservations(deviceId).find((r) => ["accepted", "observed", "charging"].includes(r.state) && finiteTime(r.startsAt));
+    }
+    trackStatus(deviceId, status2, now = Date.now()) {
+      const previous = this.lastLive.get(deviceId);
+      this.lastLive.set(deviceId, status2.state);
+      let changed = false;
+      const active = this.data.charges.find((r) => r.deviceId === deviceId && r.state === "charging");
+      if (status2.state === "4") {
+        if (!active) {
+          this.data.charges.unshift({
+            id: String(now),
+            deviceId,
+            startedAt: previous === "2" ? now : null,
+            firstSeenAt: now,
+            endedAt: null,
+            state: "charging",
+            energyKWh: Number.isFinite(status2.energyKWh) ? status2.energyKWh : null,
+            minutes: Number.isFinite(status2.minutes) ? status2.minutes : null
+          });
+          this.data.charges = this.data.charges.slice(0, LIMIT);
+          changed = true;
+        } else if (active.energyKWh !== status2.energyKWh || active.minutes !== status2.minutes) {
+          active.energyKWh = Number.isFinite(status2.energyKWh) ? status2.energyKWh : active.energyKWh;
+          active.minutes = Number.isFinite(status2.minutes) ? status2.minutes : active.minutes;
+          changed = true;
+        }
+      } else if (active) {
+        active.state = "ended";
+        active.endedAt = previous === "4" ? now : null;
+        active.energyKWh = Number.isFinite(status2.energyKWh) ? status2.energyKWh : active.energyKWh;
+        active.minutes = Number.isFinite(status2.minutes) ? status2.minutes : active.minutes;
+        changed = true;
+      }
+      const reservation = this.latestReservation(deviceId);
+      if (reservation) {
+        let state = reservation.state;
+        if (status2.mode === "3" && status2.state !== "4" && state === "accepted") state = "observed";
+        if (status2.state === "4" && state === "observed") state = "charging";
+        if (status2.state !== "4" && state === "charging" && previous === "4") state = "ended";
+        if (state !== reservation.state) {
+          reservation.state = state;
+          reservation.updatedAt = now;
+          changed = true;
+        }
+      }
+      if (changed) this.save();
+    }
+    acceptReservation(deviceId, startsAt, end, now = Date.now()) {
+      const previous = this.latestReservation(deviceId);
+      if (previous) {
+        previous.state = "replaced";
+        previous.updatedAt = now;
+      }
+      const label = end.kind === "full" ? "\u81EA\u52A8\u5145\u6EE1" : end.kind === "time" ? `${end.minutes / 60} \u5C0F\u65F6` : `${end.kWh} \u5EA6`;
+      this.data.reservations.unshift({ id: String(now), deviceId, submittedAt: now, startsAt, end: label, state: "accepted", updatedAt: now });
+      this.data.reservations = this.data.reservations.slice(0, LIMIT);
+      this.save();
+    }
+    cancelReservation(deviceId, now = Date.now()) {
+      const reservation = this.latestReservation(deviceId);
+      if (!reservation) return;
+      reservation.state = "cancelled";
+      reservation.updatedAt = now;
+      this.save();
+    }
+    clear() {
+      this.data = empty();
+      this.lastLive.clear();
+      try {
+        this.storage?.removeItem(KEY3);
+      } catch {
+      }
+    }
+  };
+
   // src/tabs.ts
   function showTab(pairs, selected) {
     if (selected < 0 || selected >= pairs.length) throw new RangeError("\u672A\u77E5\u6807\u7B7E\u9875");
@@ -1220,9 +1476,15 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "f2973df", builtAt: "2026-09-27T08:54:16.282Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "e1590d5", builtAt: "2026-09-27T09:54:58.221Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
+  var localStorageAccess;
+  try {
+    localStorageAccess = window.localStorage;
+  } catch {
+  }
+  var history = new LocalHistory(localStorageAccess);
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
     diagnostics.add(event, data, level);
     refreshDiagnostics();
@@ -1232,6 +1494,7 @@
   var statusAt = 0;
   var staleLoggedFor = 0;
   var reservationResult = "";
+  var adminMessage = "";
   var lastBlockedReservation = "";
   var reservationStartAutomatic = true;
   var confirmedReservation = null;
@@ -1242,6 +1505,37 @@
   var pad4 = (value) => String(value).padStart(2, "0");
   function localMinute(date) {
     return `${date.getFullYear()}-${pad4(date.getMonth() + 1)}-${pad4(date.getDate())}T${pad4(date.getHours())}:${pad4(date.getMinutes())}`;
+  }
+  function formatHistoryTime(value) {
+    return value && Number.isFinite(value) ? new Date(value).toLocaleString("zh-CN") : "\u672A\u77E5";
+  }
+  function renderHistory() {
+    const id = client?.currentDevice?.id || history.latestDeviceId();
+    const charges = id ? history.charges(id) : [];
+    const reservations = id ? history.reservations(id) : [];
+    const show = (boxId, entries) => {
+      const box = el(boxId);
+      box.replaceChildren();
+      if (!entries.length) {
+        box.textContent = "\u6682\u65E0\u672C\u7F51\u9875\u8BB0\u5F55";
+        return;
+      }
+      const list = document.createElement("ol");
+      list.className = "history-list";
+      for (const entry of entries) {
+        const item = document.createElement("li");
+        item.textContent = entry;
+        list.append(item);
+      }
+      box.append(list);
+    };
+    show("localChargeHistory", charges.map((r) => `\u9996\u6B21\u89C2\u5BDF\u5230\u5145\u7535\uFF1A${formatHistoryTime(r.firstSeenAt)}${r.startedAt ? "\uFF08\u89C2\u5BDF\u5230\u51C6\u5907\u2192\u5145\u7535\uFF09" : "\uFF08\u51C6\u786E\u5F00\u59CB\u65F6\u95F4\u672A\u77E5\uFF09"}
+\u505C\u6B62\u89C2\u5BDF\uFF1A${r.state === "charging" ? "\u4E0A\u6B21\u89C2\u5BDF\u5230\u5145\u7535\u4E2D\uFF0C\u5F53\u524D\u9700\u6838\u5BF9" : r.endedAt ? formatHistoryTime(r.endedAt) : "\u79BB\u7EBF\u671F\u95F4\u53D1\u751F\uFF0C\u51C6\u786E\u65F6\u95F4\u672A\u77E5"}
+\u5DF2\u5145\u65F6\u957F\uFF1A${r.minutes !== null && Number.isFinite(r.minutes) ? duration(r.minutes) : "\u672A\u77E5"} \xB7 \u7535\u91CF\uFF1A${r.energyKWh !== null && Number.isFinite(r.energyKWh) ? `${r.energyKWh.toFixed(1)} kWh` : "\u672A\u77E5"}`));
+    const names = { accepted: "\u8BBE\u5907\u5DF2\u63A5\u53D7\uFF0C\u5F85\u6838\u5BF9\u6A21\u5F0F", observed: "\u66FE\u89C2\u5BDF\u5230\u9884\u7EA6\u6A21\u5F0F", charging: "\u540E\u7EED\u89C2\u5BDF\u5230\u5145\u7535\u4E2D", ended: "\u540E\u7EED\u89C2\u5BDF\u5230\u505C\u6B62\u5145\u7535", cancelled: "\u8BBE\u5907\u5DF2\u786E\u8BA4\u53D6\u6D88", replaced: "\u88AB\u672C\u7F51\u9875\u65B0\u9884\u7EA6\u66FF\u6362" };
+    show("localReserveHistory", reservations.map((r) => `\u63D0\u4EA4\uFF1A${formatHistoryTime(r.submittedAt)} \xB7 \u9884\u7EA6\uFF1A${formatHistoryTime(r.startsAt)}
+\u7ED3\u675F\u65B9\u5F0F\uFF1A${r.end} \xB7 \u672C\u5730\u8BB0\u5F55\uFF1A${names[r.state] || "\u72B6\u6001\u672A\u77E5"}`));
+    text("localHistoryHint", history.available ? "\u4EC5\u5B58\u50A8\u5728\u6B64\u6D4F\u89C8\u5668\u7684\u7F51\u7AD9\u6570\u636E\u4E2D\u3002" : "\u6D4F\u89C8\u5668\u7981\u6B62\u672C\u5730\u5B58\u50A8\uFF1B\u8BB0\u5F55\u4EC5\u5728\u672C\u6B21\u9875\u9762\u6709\u6548\u3002");
   }
   function resetReservationStart() {
     reservationStartAutomatic = true;
@@ -1267,7 +1561,7 @@
   function updateReservationCountdown() {
     const box = el("reserveCountdownBox");
     const currentDeviceId = client?.currentDevice?.id;
-    if (!confirmedReservation || currentDeviceId && currentDeviceId !== confirmedReservation.deviceId) {
+    if (!client?.authorized || !currentDeviceId || !confirmedReservation || currentDeviceId !== confirmedReservation.deviceId) {
       box.hidden = true;
       return;
     }
@@ -1280,7 +1574,7 @@
     }
     box.hidden = false;
     text("reserveCountdown", countdownTo(confirmedReservation.startsAt, now));
-    text("reserveCountdownLabel", now < confirmedReservation.startsAt ? "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u672C\u5730\u65F6\u949F\u4F30\u7B97\uFF09" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u5230\uFF0C\u7B49\u5F85\u8BBE\u5907\u72B6\u6001\u786E\u8BA4");
+    text("reserveCountdownLabel", now < confirmedReservation.startsAt ? confirmedReservation.source === "restored" ? "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u4EC5\u672C\u5730\u8BB0\u5F55\uFF1B\u8BBE\u5907\u65F6\u95F4\u4E0D\u53EF\u6838\u5BF9\uFF09" : "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u672C\u5730\u65F6\u949F\u4F30\u7B97\uFF09" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u5230\uFF0C\u7B49\u5F85\u8BBE\u5907\u72B6\u6001\u786E\u8BA4");
   }
   function environment() {
     const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" : ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
@@ -1296,9 +1590,39 @@
     if (status2.state === "4") return "\u5145\u7535\u4E2D";
     if (status2.state === "3") return "\u8BBE\u5907\u62A5\u51FA\u6545\u969C";
     if (status2.state === "2") return "\u5DF2\u5C31\u7EEA";
-    if (status2.state === "5") return "\u5145\u7535\u7ED3\u675F\uFF08\u539F\u5C0F\u7A0B\u5E8F\u6807\u4E3A ChargEnd\uFF09";
+    if (status2.state === "5") return "\u5145\u7535\u7ED3\u675F";
+    if (status2.state === "6") return "\u672A\u63D2\u67AA";
+    if (status2.state === "7") return "\u914D\u7F6E\u4E2D";
     return `\u8BBE\u5907\u72B6\u6001 ${status2.state || "\u672A\u77E5"}\uFF08\u542B\u4E49\u672A\u6838\u5B9E\uFF09`;
   };
+  var stateLabels = { "2": "\u51C6\u5907", "3": "\u6545\u969C", "4": "\u5145\u7535", "5": "\u7ED3\u675F", "6": "\u672A\u63D2\u67AA", "7": "\u914D\u7F6E\u4E2D" };
+  var modeLabels = { "0": "\u5F85\u673A", "1": "VIN", "2": "\u84DD\u7259", "3": "\u9884\u7EA6", "4": "\u5373\u63D2\u5373\u5145", "5": "\u65E0\u611F\u5145\u7535" };
+  var faultLabelsNew = {
+    "0000": "\u5DE5\u4F5C\u6B63\u5E38",
+    "0001": "CC1\u8FDE\u63A5\u5F02\u5E38",
+    "0002": "BMS\u901A\u4FE1\u6545\u969C",
+    "0003": "BMS\u901A\u4FE1\u8D85\u65F6\uFF08\u8D85\u65F6\u6B21\u6570\u5927\u4E8E3\u6B21\uFF09",
+    "0009": "\u7535\u5B50\u9501\u6545\u969C",
+    "0010": "\u76F4\u6D41\u63A5\u89E6\u5668\u9ECF\u8FDE\u6545\u969C",
+    "0012": "\u6025\u505C\u6309\u94AE\u88AB\u6309\u4E0B",
+    "0014": "\u7535\u6C60\u7535\u538B\u4E0E\u5145\u7535\u673A\u8F93\u51FA\u8303\u56F4\u4E0D\u5339\u914D",
+    "0018": "\u6A21\u5757\u8F93\u51FA\u8FC7/\u6B20\u538B",
+    "0030": "\u76F4\u6D41\u63A5\u89E6\u5668\u62D2\u52A8\u6545\u969C"
+  };
+  function faultDescription(status2) {
+    if (status2.protocol === 2) return faultLabelsNew[status2.power] || "\u539F\u5C0F\u7A0B\u5E8F\u672A\u63D0\u4F9B\u8BE5\u6545\u969C\u7801\u91CA\u4E49";
+    return status2.power === "0000" ? "\u5DE5\u4F5C\u6B63\u5E38" : "\u65E7\u534F\u8BAE\u7684\u6545\u969C\u91CA\u4E49\u4F9D\u8BBE\u5907\u5B50\u578B\u53F7\u800C\u5F02\uFF0C\u5F53\u524D\u672A\u80FD\u5224\u5B9A\uFF1B\u8BF7\u6838\u5BF9\u539F\u5C0F\u7A0B\u5E8F";
+  }
+  function faultAdvice(status2) {
+    if (status2.protocol !== 2 || !faultLabelsNew[status2.power]) return "\u5F53\u524D\u65E0\u6CD5\u6309\u8BBE\u5907\u5B50\u578B\u53F7\u6838\u5B9E\u6392\u67E5\u65B9\u6CD5\uFF0C\u8BF7\u6838\u5BF9\u539F\u5C0F\u7A0B\u5E8F\u6216\u8054\u7CFB\u552E\u540E\u3002";
+    if (status2.power === "0000") return "\u65E0\u6545\u969C\u3002";
+    if (status2.power === "0012") return "\u539F\u5C0F\u7A0B\u5E8F\u63D0\u793A\uFF1A\u5C06\u6025\u505C\u952E\u5F39\u8D77\u590D\u4F4D\uFF1B\u82E5\u4ECD\u672A\u89E3\u51B3\uFF0C\u8BF7\u8054\u7CFB\u552E\u540E\u3002";
+    return "\u539F\u5C0F\u7A0B\u5E8F\u63D0\u793A\uFF1A\u89E3\u9664\u7535\u5B50\u9501\u5E76\u62D4\u9664\u5145\u7535\u67AA\uFF0C\u91CD\u65B0\u63D2\u67AA\u5E76\u518D\u6B21\u542F\u52A8\uFF1B\u82E5\u4ECD\u672A\u89E3\u51B3\uFF0C\u8BF7\u8054\u7CFB\u552E\u540E\u3002";
+  }
+  function duration(minutes) {
+    if (!Number.isFinite(minutes) || minutes < 0) return "--";
+    return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}min`;
+  }
   function paintFeedback() {
     const box = el("liveLog");
     const followLatest = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
@@ -1335,7 +1659,10 @@
   function handleEvent(event) {
     if (event.type === "phase") {
       phase = event.phase;
-      if (phase === "offline" || phase === "connecting") reservationResult = "";
+      if (phase === "offline" || phase === "connecting") {
+        reservationResult = "";
+        adminMessage = "";
+      }
       diagnostics.add("phase", { phase });
       record(event.message);
     }
@@ -1350,6 +1677,14 @@
     if (event.type === "protocol") record(`\u534F\u8BAE\uFF1A${event.version === 1 ? "\u65E7\u7248" : "\u65B0\u7248"}\uFF08${event.source}\uFF09`);
     if (event.type === "auth-needed") record(event.message);
     if (event.type === "status") {
+      const deviceId = client?.currentDevice?.id;
+      if (deviceId) {
+        history.trackStatus(deviceId, event.status);
+        const saved = history.latestReservation(deviceId);
+        if (event.status.mode === "3" && saved && (!confirmedReservation || confirmedReservation.deviceId !== deviceId)) {
+          confirmedReservation = { deviceId, startsAt: saved.startsAt, source: "restored" };
+        }
+      }
       if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
       statusAt = Date.now();
       staleLoggedFor = 0;
@@ -1386,9 +1721,18 @@
     indicator.title = connectionLabel;
     text("liveProtocolName", client?.currentProtocol === 1 ? "\u65E7\u7248\u534F\u8BAE" : client?.currentProtocol === 2 ? "\u65B0\u7248\u534F\u8BAE" : "\u7B49\u5F85\u8BC6\u522B");
     text("liveSoc", status2 && Number.isFinite(status2.soc) ? `${status2.soc}%` : "--");
+    el("liveSocRing").style.setProperty("--soc", status2 && Number.isFinite(status2.soc) ? `${Math.max(0, Math.min(100, status2.soc))}%` : "0%");
+    text("liveStateCode", status2 ? stateLabels[status2.state] || `\u72B6\u6001 ${status2.state}` : "--");
+    text("liveMode", status2 ? modeLabels[status2.mode] || `\u6A21\u5F0F ${status2.mode || "\u672A\u77E5"}` : "--");
+    text("liveLock", status2 ? status2.lock === "0" ? "\u65AD\u5F00" : status2.lock === "1" ? "\u95ED\u5408" : `\u72B6\u6001 ${status2.lock}` : "--");
     text("liveEnergy", status2 && Number.isFinite(status2.energyKWh) ? `${status2.energyKWh.toFixed(1)} kWh` : "--");
-    text("liveMinutes", status2 && Number.isFinite(status2.minutes) ? `${status2.minutes} min` : "--");
-    text("liveElectrical", status2 ? `\u7535\u538B ${status2.voltage} V \xB7 \u7535\u6D41 ${status2.currentA ?? "--"} A \xB7 \u529F\u7387\u539F\u503C ${status2.power}\uFF08\u5355\u4F4D\u672A\u6838\u5B9E\uFF09` : "\u65E0\u8BBE\u5907\u6570\u636E");
+    text("liveMinutes", status2 ? duration(status2.minutes) : "--");
+    text("liveRemaining", status2 ? duration(status2.remainingMinutes) : "--");
+    text("liveVoltage", status2 ? `${status2.voltage} V` : "--");
+    text("liveCurrent", status2 && status2.currentA !== null ? `${status2.currentA} A` : "--");
+    text("liveFault", status2 ? status2.power || "--" : "--");
+    text("liveElectrical", status2 ? `\u6545\u969C\u72B6\u6001\uFF1A${faultDescription(status2)}\uFF08${status2.power || "\u672A\u62A5\u544A"}\uFF09` : "\u65E0\u8BBE\u5907\u6570\u636E");
+    el("liveFaultDetail").disabled = !status2;
     text("liveFreshness", !status2 ? "\u5C1A\u672A\u6536\u5230\u8BBE\u5907\u72B6\u6001" : fresh ? "\u8BBE\u5907\u72B6\u6001\uFF1A\u521A\u66F4\u65B0\uFF08\u5B9E\u65F6\u901A\u77E5\uFF09" : "\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF0C\u64CD\u4F5C\u5DF2\u7981\u7528\uFF0C\u8BF7\u5237\u65B0");
     const loginProgress = el("liveLoginProgress");
     loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
@@ -1403,6 +1747,22 @@
     el("liveChoose").disabled = !supported || busy;
     el("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
     el("liveForgetPassword").disabled = !client?.rememberedName;
+    const adminPanel = el("adminPanel");
+    adminPanel.hidden = !client?.authorized;
+    const adminReady = !!client?.administratorAuthorized;
+    el("adminAuthBox").hidden = adminReady;
+    el("adminControls").hidden = !adminReady;
+    el("adminLogin").disabled = !client?.authorized || !!client.adminPending || busy;
+    for (const id of ["adminPlugOn", "adminPlugOff", "adminChangeBluetoothPassword", "adminChangePassword"])
+      el(id).disabled = !adminReady || !fresh || busy || !!client?.adminPending;
+    for (const id of ["adminMuteOn", "adminMuteOff"])
+      el(id).disabled = !adminReady || !fresh || busy || !!client?.adminPending || client?.currentProtocol !== 2;
+    el("adminPair").disabled = !adminReady || !fresh || busy || !!client?.adminPending || !client?.pairingAvailable;
+    text("adminPairHint", client?.currentProtocol === 2 && !client.pairingAvailable ? "\u5F53\u524D\u8FDE\u63A5\u672A\u53D1\u73B0\u539F\u5C0F\u7A0B\u5E8F\u6240\u9700\u7684 FF03 \u914D\u5BF9\u901A\u77E5\u7279\u5F81\uFF1B\u4E0D\u80FD\u542F\u52A8\u65E0\u611F\u914D\u5BF9\u3002" : "\u4EC5\u65B0\u7248\u534F\u8BAE\u6709\u9759\u97F3\u548C\u65E0\u611F\u914D\u5BF9\u6307\u4EE4\uFF1B\u914D\u5BF9\u56DE\u6267\u4E0D\u7B49\u4E8E\u624B\u673A\u5DF2\u5B8C\u6210\u7CFB\u7EDF\u84DD\u7259\u914D\u5BF9\u3002");
+    const authMode = el("adminAuthMode");
+    authMode.disabled = !adminReady || busy;
+    if (document.activeElement !== authMode) authMode.value = client?.manualBluetoothLogin ? "manual" : "auto";
+    text("adminState", adminMessage || (adminReady ? "\u7BA1\u7406\u5458\u5DF2\u9A8C\u8BC1\uFF1B\u7BA1\u7406\u64CD\u4F5C\u4ECD\u9700\u8BBE\u5907\u56DE\u6267\u3002" : "\u7BA1\u7406\u5458\u6743\u9650\u672A\u9A8C\u8BC1\u3002"));
     const reservationBlocked = status2 ? reservationBlockReason(status2) : null;
     el("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
     text("reserveSubmit", client?.canCancelReservation ? "\u4FEE\u6539\u9884\u7EA6" : "\u63D0\u4EA4\u9884\u7EA6");
@@ -1413,6 +1773,7 @@
     reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1e3));
     text("reserveState", !client?.authorized ? "\u8FDE\u63A5\u5E76\u6388\u6743\u540E\u53EF\u9884\u7EA6\u3002" : client.reservationPending ? "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0C\u7B49\u5F85\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u6B64\u65F6\u52FF\u91CD\u590D\u63D0\u4EA4\u3002" : reservationResult || !fresh ? reservationResult || "\u7B49\u5F85\u6700\u65B0\u8BBE\u5907\u72B6\u6001\uFF0C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002" : status2?.mode === "3" ? "\u8BBE\u5907\u901A\u77E5\u663E\u793A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u4FEE\u6539\u6216\u53D6\u6D88\u3002" : reservationBlocked ? reservationBlocked : client.canCancelReservation ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u63D0\u4EA4\uFF0C\u5C1A\u5F85\u65B0\u7684\u9884\u7EA6\u6A21\u5F0F\u72B6\u6001\u901A\u77E5\u3002" : "\u8BBE\u5907\u672A\u62A5\u544A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u8BBE\u7F6E\u65B0\u7684\u9884\u7EA6\u3002");
     updateReservationCountdown();
+    renderHistory();
   }
   function selectedProtocol() {
     const value = el("liveProtocol").value;
@@ -1577,10 +1938,14 @@
     try {
       if (action === "submit") {
         await client.submitReservation(reservation);
-        if (deviceId && client.currentDevice?.id === deviceId) confirmedReservation = { deviceId, startsAt: reservation.start.getTime() };
+        if (deviceId && client.currentDevice?.id === deviceId) {
+          confirmedReservation = { deviceId, startsAt: reservation.start.getTime(), source: "session" };
+          history.acceptReservation(deviceId, reservation.start.getTime(), reservation.end);
+        }
       } else {
         await client.cancelReservation();
         if (confirmedReservation?.deviceId === deviceId) confirmedReservation = null;
+        if (deviceId) history.cancelReservation(deviceId);
       }
       reservationResult = `\u8BBE\u5907\u5DF2\u786E\u8BA4${label}\uFF1B\u8BF7\u6838\u5BF9\u8BBE\u5907\u5F53\u524D\u9884\u7EA6\u72B6\u6001\u3002`;
       record(reservationResult);
@@ -1592,6 +1957,73 @@
       render();
     }
   }
+  var adminNames = {
+    "admin-auth": "\u7BA1\u7406\u5458\u8BA4\u8BC1",
+    "plug-on": "\u8BBE\u7F6E\u5373\u63D2\u5373\u5145",
+    "plug-off": "\u53D6\u6D88\u5373\u63D2\u5373\u5145",
+    "mute-on": "\u8BBE\u7F6E\u9759\u97F3",
+    "mute-off": "\u53D6\u6D88\u9759\u97F3",
+    pair: "\u5F00\u542F\u65E0\u611F\u914D\u5BF9\u7A97\u53E3",
+    "bluetooth-password": "\u4FEE\u6539\u84DD\u7259\u9A8C\u8BC1\u7801",
+    "admin-password": "\u4FEE\u6539\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801"
+  };
+  async function runAdmin(action, inputId) {
+    if (!client) return;
+    const label = adminNames[action];
+    const input = inputId ? el(inputId) : null;
+    const value = input?.value;
+    if (input && (!/^\d{5}$/.test(value ?? "") || action !== "admin-auth" && Number(value) > 65535)) {
+      reportOperationError(`${label}\uFF1A\u8BF7\u8F93\u5165\u4E94\u4F4D\u6570\u5B57${action === "admin-auth" ? "" : "\uFF0C\u4E14\u6570\u503C\u4E0D\u5927\u4E8E 65535"}\u3002`);
+      return;
+    }
+    if (action !== "admin-auth") {
+      const warning = action === "plug-on" ? "\u539F\u5C0F\u7A0B\u5E8F\u63D0\u793A\uFF1A\u5373\u63D2\u5373\u5145\u53EF\u80FD\u88AB\u4ED6\u4EBA\u4F7F\u7528\u3002" : action === "pair" ? "\u8BBE\u5907\u6253\u5F00\u914D\u5BF9\u7A97\u53E3\u540E\uFF0C\u8FD8\u987B\u5728 iOS \u7CFB\u7EDF\u5B8C\u6210\u914D\u5BF9\uFF1B\u56DE\u6267\u4E0D\u80FD\u8BC1\u660E\u65E0\u611F\u5145\u7535\u5DF2\u7ECF\u542F\u7528\u3002" : action === "bluetooth-password" ? "\u8BBE\u5907\u786E\u8BA4\u540E\u4F1A\u5220\u9664\u65E7\u7684\u84DD\u7259\u9A8C\u8BC1\u7801\u7F13\u5B58\uFF0C\u4E0B\u4E00\u6B21\u9700\u8F93\u5165\u65B0\u7684\u9A8C\u8BC1\u7801\u3002" : "";
+      if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u8BBE\u5907\u6267\u884C\u300C${label}\u300D\uFF1F${warning}
+\u4EC5\u8BBE\u5907\u8FD4\u56DE\u5339\u914D\u56DE\u6267\u624D\u89C6\u4E3A\u63A5\u53D7\u64CD\u4F5C\u3002`)) return;
+    }
+    if (input) input.value = "";
+    busy = true;
+    adminMessage = `\u6B63\u5728${label}\uFF0C\u7B49\u5F85\u8BBE\u5907\u56DE\u6267\u2026`;
+    render();
+    try {
+      await client.admin(action, value);
+      adminMessage = action === "pair" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u5F00\u542F\u914D\u5BF9\u7A97\u53E3\uFF1B\u8BF7\u5728 iOS \u7CFB\u7EDF\u5B8C\u6210\u914D\u5BF9\u5E76\u73B0\u573A\u6838\u5BF9\u662F\u5426\u8FDB\u5165\u65E0\u611F\u6A21\u5F0F\u3002" : action === "bluetooth-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u65E7\u9A8C\u8BC1\u7801\u7F13\u5B58\u5DF2\u5220\u9664\uFF0C\u91CD\u65B0\u8FDE\u63A5\u65F6\u987B\u8F93\u5165\u65B0\u9A8C\u8BC1\u7801\u5E76\u7531\u8BBE\u5907\u9A8C\u8BC1\u3002" : action === "admin-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u539F\u7BA1\u7406\u5458\u6743\u9650\u5DF2\u5931\u6548\uFF0C\u8BF7\u7528\u65B0\u9A8C\u8BC1\u7801\u91CD\u65B0\u9A8C\u8BC1\u3002" : action === "mute-on" || action === "mute-off" ? "\u8BBE\u5907\u5DF2\u63A5\u53D7\u9759\u97F3\u64CD\u4F5C\uFF1B\u72B6\u6001\u62A5\u6587\u4E0D\u542B\u9759\u97F3\u6807\u5FD7\uFF0C\u8BF7\u73B0\u573A\u6838\u5BF9\u3002" : action === "admin-auth" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u7BA1\u7406\u5458\u6743\u9650\u3002" : `\u8BBE\u5907\u5DF2\u63A5\u53D7${label}\uFF1B\u8BF7\u7B49\u540E\u7EED\u8BBE\u5907\u72B6\u6001\u6838\u5BF9\u3002`;
+      record(adminMessage);
+    } catch (error) {
+      adminMessage = `${label}\u672A\u786E\u8BA4`;
+      failure(label, error);
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+  for (const [id, action, input] of [
+    ["adminLogin", "admin-auth", "adminPassword"],
+    ["adminPlugOn", "plug-on"],
+    ["adminPlugOff", "plug-off"],
+    ["adminMuteOn", "mute-on"],
+    ["adminMuteOff", "mute-off"],
+    ["adminPair", "pair"],
+    ["adminChangeBluetoothPassword", "bluetooth-password", "adminNewBluetoothPassword"],
+    ["adminChangePassword", "admin-password", "adminNewPassword"]
+  ]) el(id).addEventListener("click", () => void runAdmin(action, input));
+  el("adminAuthMode").addEventListener("change", () => {
+    if (!client?.administratorAuthorized) return;
+    try {
+      client.setManualBluetoothLogin(el("adminAuthMode").value === "manual");
+      adminMessage = "\u5DF2\u4FDD\u5B58\u672C\u7F51\u9875\u8BA4\u8BC1\u65B9\u5F0F\uFF1B\u8FDE\u63A5\u65F6\u4ECD\u9700\u8BBE\u5907\u786E\u8BA4\u84DD\u7259\u9A8C\u8BC1\u7801\u3002";
+      render();
+    } catch (error) {
+      failure("\u4FDD\u5B58\u8BA4\u8BC1\u65B9\u5F0F", error);
+    }
+  });
+  el("liveFaultDetail").addEventListener("click", () => {
+    const status2 = client?.currentStatus;
+    if (status2) window.alert(`\u6545\u969C\u72B6\u6001\uFF1A${status2.power || "\u672A\u62A5\u544A"}
+${faultDescription(status2)}
+${faultAdvice(status2)}
+\u4EC5\u4F9D\u636E\u672C\u6B21\u8BBE\u5907\u72B6\u6001\u901A\u77E5\u3002`);
+  });
   el("reserveSubmit").addEventListener("click", () => void reserve("submit"));
   el("reserveCancel").addEventListener("click", () => void reserve("cancel"));
   el("liveDisconnect").addEventListener("click", () => {
@@ -1607,11 +2039,18 @@
     render();
   });
   el("liveForgetDevice").addEventListener("click", () => {
-    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u5168\u90E8\u8BBE\u5907\u8BB0\u5F55\u548C\u9A8C\u8BC1\u7801\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
+    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u8BB0\u5F55\u3001\u9A8C\u8BC1\u7801\u53CA\u5168\u90E8\u672C\u5730\u5145\u7535/\u9884\u7EA6\u5386\u53F2\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
     client?.forgetDevice();
+    history.clear();
     statusAt = 0;
     confirmedReservation = null;
     diagnostics.add("device-records-forgotten");
+    render();
+  });
+  el("localHistoryClear").addEventListener("click", () => {
+    if (!window.confirm("\u786E\u5B9A\u5220\u9664\u6B64\u6D4F\u89C8\u5668\u4E2D\u6240\u6709\u8BBE\u5907\u7684\u672C\u7F51\u9875\u5145\u7535\u53CA\u9884\u7EA6\u8BB0\u5F55\uFF1F\u65E0\u6CD5\u6062\u590D\u3002")) return;
+    history.clear();
+    confirmedReservation = null;
     render();
   });
   el("copyDiagnostics").addEventListener("click", async () => {
@@ -1659,23 +2098,27 @@
     ["tabFeedback", "tabPanelFeedback"],
     ["tabAbout", "tabPanelAbout"]
   ].map(([tabId, panelId]) => ({ tab: el(tabId), panel: el(panelId) }));
-  tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
+  function activateTab(index) {
+    showTab(tabPairs, index);
+    el("liveTabContent").scrollTop = 0;
+  }
+  tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => activateTab(index)));
   el("liveTabs").addEventListener("keydown", (event) => {
     const current = tabPairs.findIndex(({ tab }) => tab === event.target);
     const next = tabIndexForKey(event.key, current, tabPairs.length);
     if (next === null) return;
     event.preventDefault();
-    showTab(tabPairs, next);
+    activateTab(next);
     tabPairs[next].tab.focus();
   });
-  showTab(tabPairs, 0);
+  activateTab(0);
   resetReservationStart();
   diagnostics.add("app-start", {
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "f2973df",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:54:16.282Z")
+    buildRevision: "e1590d5",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T09:54:58.221Z")
   });
   refreshDiagnostics(true);
   render();

@@ -1,4 +1,4 @@
-import { command, FrameDecoder, reservationCommand, syncClock, type ControlAction, type DeviceStatus, type Frame, type Reservation, type ReservationAction, type Version } from "./protocol";
+import { adminCommand, command, FrameDecoder, reservationCommand, syncClock, type AdminAction, type ControlAction, type DeviceStatus, type Frame, type Reservation, type ReservationAction, type Version } from "./protocol";
 import { diagnosticError, type DiagnosticLevel, type DiagnosticValue } from "./diagnostics";
 
 // Web Bluetooth 在部分 TypeScript DOM 版本中没有类型定义；只声明本项目使用到的 API。
@@ -34,12 +34,14 @@ export type ChargerEvent =
   | { type: "reservation"; action: ReservationAction; message: string }
   | { type: "auth-needed"; message: string };
 const KEY = "wattsaving-ble-devices-v1";
+const AUTH_MODE_KEY = "wattsaving-auth-always-ask-v1";
 const UUID = (short: string): string => `0000${short}-0000-1000-8000-00805f9b34fb`;
 const SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
 // 原小程序只在 FF00/FFE0 查通知，只在 FF00/FFE5 查写入。
 const NOTIFY_SERVICES = new Set(["ff00", "ffe0"]);
 const WRITE_SERVICES = new Set(["ff00", "ffe5"]);
 const NOTIFY = new Set([UUID("ff01"), UUID("ffe4")]);
+const PAIR_NOTIFY = UUID("ff03");
 const WRITE = new Set([UUID("ff02"), UUID("ffe9")]);
 class ConnectionInterruptedError extends Error {
   constructor() { super("蓝牙连接在服务发现期间已中止；无法判断设备的服务或特征是否存在"); this.name = "ConnectionInterruptedError"; }
@@ -106,6 +108,7 @@ export class ChargerClient {
   private server: BleServer | null = null;
   private writer: BleCharacteristic | null = null;
   private notifier: BleCharacteristic | null = null;
+  private pairingNotifier: BleCharacteristic | null = null;
   private listener: ((event: Event) => void) | null = null;
   private decoder = new FrameDecoder();
   private rxNotifications = 0;
@@ -132,6 +135,8 @@ export class ChargerClient {
   private pendingAuth: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password: string; remember: boolean } | null = null;
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingReservation: { action: ReservationAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingAdmin: { action: AdminAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private adminVerified = false;
   private reservationAccepted: boolean | null = null;
   private fallbackVault: Vault = { lastId: "", devices: {} };
 
@@ -147,6 +152,14 @@ export class ChargerClient {
   get authorized(): boolean { return this.phase === "ready" && !!this.server?.connected; }
   get automaticLoginPending(): boolean { return this.autoLoginInProgress && this.phase === "authenticating"; }
   get reservationPending(): boolean { return !!this.pendingReservation; }
+  get adminPending(): boolean { return !!this.pendingAdmin; }
+  get administratorAuthorized(): boolean { return this.authorized && this.adminVerified; }
+  get pairingAvailable(): boolean { return this.protocol === 2 && !!this.pairingNotifier; }
+  get manualBluetoothLogin(): boolean { try { return localStorage.getItem(AUTH_MODE_KEY) === "1"; } catch { return false; } }
+  setManualBluetoothLogin(value: boolean): void {
+    try { if (value) localStorage.setItem(AUTH_MODE_KEY, "1"); else localStorage.removeItem(AUTH_MODE_KEY); }
+    catch { throw new Error("浏览器拒绝保存认证方式"); }
+  }
   get canCancelReservation(): boolean { return this.reservationAccepted === null ? this.latest?.mode === "3" : this.reservationAccepted; }
   get rememberedName(): string | null {
     const saved = this.loadVault();
@@ -197,6 +210,7 @@ export class ChargerClient {
     this.lastObserved = null;
     this.recentDevice = null;
     this.storeVault({ lastId: "", devices: {} });
+    try { localStorage.removeItem(AUTH_MODE_KEY); } catch { /* 本地存储可能不可用 */ }
     this.emit({ type: "notice", message: "已清除该网站保存的设备和蓝牙验证码。" });
   }
   private setPhase(phase: Phase, message: string): void { this.phase = phase; this.emit({ type: "phase", phase, message }); }
@@ -296,7 +310,7 @@ export class ChargerClient {
         throw new ConnectionInterruptedError();
       };
       ensureActive("before-services");
-      let notifier: BleCharacteristic | null = null, writer: BleCharacteristic | null = null;
+      let notifier: BleCharacteristic | null = null, writer: BleCharacteristic | null = null, pairingNotifier: BleCharacteristic | null = null;
       let notifyService = "none", writeService = "none";
       let servicesFound = 0, missingServices = 0, failedServices = 0;
       for (const uuid of SERVICES) {
@@ -369,11 +383,12 @@ export class ChargerClient {
           });
           if (selectedNotify) { notifier = characteristic; notifyService = serviceCode; }
           if (selectedWrite) { writer = characteristic; writeService = serviceCode; }
+          if (serviceCode === "ff00" && id === PAIR_NOTIFY && (properties?.notify || properties?.indicate)) pairingNotifier = characteristic;
         }
         if (notifier && writer) break;
       }
       ensureActive("complete-discovery");
-      this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer });
+      this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer, pairingNotify: !!pairingNotifier });
       this.diagnose("characteristics", { notify: !!notifier, write: !!writer,
         notifyService, notifyUuid: diagnosticUuid(notifier?.uuid), writeService, writeUuid: diagnosticUuid(writer?.uuid) });
       if (!notifier || !writer) {
@@ -382,6 +397,7 @@ export class ChargerClient {
         throw new Error("找不到旧应用使用的通知/写入特征；请核对充电桩型号");
       }
       this.writer = writer;
+      this.pairingNotifier = pairingNotifier;
       this.listener = event => {
         const view = (event.target as BleCharacteristic | null)?.value;
         if (view && epoch === this.epoch) this.onBytes(view);
@@ -428,7 +444,7 @@ export class ChargerClient {
     this.emit({ type: "protocol", version, source });
     if (this.autoLoginTried) return;
     const saved = this.loadVault().devices[this.device!.id];
-    if (saved?.password && /^\d{5}$/.test(saved.password)) {
+    if (!this.manualBluetoothLogin && saved?.password && /^\d{5}$/.test(saved.password)) {
       this.diagnose("auth-gate", { stage: "cached-password" });
       this.diagnose("auth-cached-available");
       this.autoLoginTried = true;
@@ -472,14 +488,14 @@ export class ChargerClient {
   }
   async refresh(): Promise<void> {
     if (!this.authorized || !this.protocol) throw new Error("请先通过设备授权");
-    if (this.pendingReservation) throw new Error("正在等待预约回执，请勿同时发送同步指令");
+    if (this.pendingReservation || this.pendingAdmin) throw new Error("正在等待设备管理或预约回执，请勿同时发送同步指令");
     // 旧应用使用同步设备时钟的帧触发状态更新；它不是无副作用的读取操作。
     await this.write(syncClock(this.protocol), "clock-sync");
     this.emit({ type: "notice", message: "已发送设备时钟同步帧，等待状态通知。" });
   }
   control(action: ControlAction): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("上一条指令尚未确认");
     const s = this.latest;
     if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("设备当前不满足启动条件：需就绪、插枪、无预约或即插即充冲突");
     if (action === "stop" && s.state !== "4") throw new Error("只有充电中才能停止");
@@ -492,11 +508,35 @@ export class ChargerClient {
       void this.write(frame, action).catch(error => this.rejectControl(new Error(`发送指令失败：${message(error)}`), "write-error"));
     });
   }
+  admin(action: AdminAction, password?: string): Promise<void> {
+    if (!this.authorized || !this.protocol || !this.device) throw new Error("请先连接并通过设备蓝牙授权");
+    if (action !== "admin-auth" && !this.adminVerified) throw new Error("请先使用独立管理员验证码取得设备确认");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("上一条设备操作尚未确认");
+    if (action !== "admin-auth" && (!this.latest || Date.now() - this.latestAt > 20000)) throw new Error("设备状态已过期；管理操作需要最新设备状态");
+    const status = this.latest;
+    if (action === "plug-on" && (status?.mode === "3" || status?.mode === "5")) throw new Error("请先取消预约或无感充电模式");
+    if (action === "pair" && (status?.mode === "3" || status?.selfStartFlag === "2")) throw new Error("请先取消预约或即插即充模式");
+    if (action === "pair" && !this.pairingNotifier) throw new Error("未发现原小程序配对所需的 FF03 通知特征；不能启动无感配对");
+    const frame = adminCommand(this.protocol, action, password);
+    this.diagnose("admin-request", { action, version: this.protocol });
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => this.rejectAdmin(new Error("设备管理回执超时，结果未知，请核对状态后再操作"), "timeout"), 10000);
+      this.pendingAdmin = { action, resolve, reject, timer };
+      void this.write(frame, action).catch(error => this.rejectAdmin(new Error(`发送管理指令失败：${message(error)}`), "write-error"));
+    });
+  }
+  private rejectAdmin(error: Error, reason = "unknown"): void {
+    const pending = this.pendingAdmin;
+    if (!pending) return;
+    this.pendingAdmin = null; clearTimeout(pending.timer);
+    this.diagnose("admin-unconfirmed", { action: pending.action, reason }, "warn");
+    pending.reject(error);
+  }
   submitReservation(reservation: Reservation): Promise<void> { return this.reserve("submit", reservation); }
   cancelReservation(): Promise<void> { return this.reserve("cancel"); }
   private reserve(action: ReservationAction, reservation?: Reservation): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin) throw new Error("上一条指令尚未确认");
     const status = this.latest;
     if (action === "submit") {
       const blocked = reservationBlockReason(status);
@@ -573,6 +613,30 @@ export class ChargerClient {
       void this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}`, severity: "error" }));
       return;
     }
+    if (frame.type === "admin") {
+      const pending = this.pendingAdmin;
+      const matched = !!pending && (frame.action === pending.action || frame.action === "mute" &&
+        (pending.action === "mute-on" || pending.action === "mute-off"));
+      this.diagnose("admin-reply", { action: frame.action, accepted: frame.ok, matched });
+      if (!matched || !pending) return;
+      if (pending.action === "pair" && frame.ok && this.pairingNotifier) {
+        const epoch = this.epoch;
+        void this.pairingNotifier.startNotifications().then(() => {
+          if (this.pendingAdmin !== pending) return;
+          this.pendingAdmin = null; clearTimeout(pending.timer);
+          if (this.epoch === epoch && this.authorized) pending.resolve();
+          else pending.reject(new Error("配对通知建立期间蓝牙已断线；实际结果未知"));
+        }, error => this.rejectAdmin(new Error(`设备已打开配对窗口，但无法订阅配对通知：${message(error)}`), "pair-notify-error"));
+        return;
+      }
+      this.pendingAdmin = null; clearTimeout(pending.timer);
+      if (!frame.ok) { pending.reject(new Error("设备拒绝管理员验证或设置")); return; }
+      if (pending.action === "admin-auth") this.adminVerified = true;
+      if (pending.action === "admin-password") this.adminVerified = false;
+      if (pending.action === "bluetooth-password") this.forgetPassword();
+      pending.resolve();
+      return;
+    }
     if (frame.type === "reservation") {
       const pending = this.pendingReservation;
       const matched = !!pending && pending.action === frame.action;
@@ -615,7 +679,7 @@ export class ChargerClient {
       this.diagnose("control-ack-ignored", { action: frame.action, reason: this.pendingControl ? "action-mismatch" : "no-pending" }, "warn");
     }
   }
-  private async write(text: string, action: "auth" | "clock-sync" | ControlAction | "reservation-submit" | "reservation-cancel"): Promise<void> {
+  private async write(text: string, action: "auth" | "clock-sync" | ControlAction | AdminAction | "reservation-submit" | "reservation-cancel"): Promise<void> {
     if (!this.enabled()) throw new Error("真机控制模式已关闭，不发送蓝牙指令");
     const writer = this.writer;
     if (!writer || !this.server?.connected) throw new Error("蓝牙连接已断开");
@@ -639,10 +703,10 @@ export class ChargerClient {
       afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null,
       stageMs: this.stageAt ? Math.max(0, Date.now() - this.stageAt) : null,
       ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
-      pendingReservation: !!this.pendingReservation, notifications: this.rxNotifications }, "warn");
+      pendingReservation: !!this.pendingReservation, pendingAdmin: !!this.pendingAdmin, notifications: this.rxNotifications }, "warn");
     this.diagnose("disconnect-rx-summary", { attempt: this.attempt, notifications: this.rxNotifications,
       totalBytes: this.rxBytes, parsed: this.decodedFrames, unknown: this.unknownFrames, statuses: this.statusFrames });
-    const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation);
+    const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin);
     const chooserStillConnecting = this.connectionSource === "chooser" && this.phase === "connecting";
     this.disconnect("gatt-event");
     this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。",
@@ -652,7 +716,7 @@ export class ChargerClient {
     const context = { attempt: this.attempt, phase: this.phase, page: pageVisibility(),
       afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null,
       ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
-      pendingReservation: !!this.pendingReservation };
+      pendingReservation: !!this.pendingReservation, pendingAdmin: !!this.pendingAdmin };
     this.epoch++;
     this.autoLoginInProgress = false;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
@@ -660,12 +724,14 @@ export class ChargerClient {
     this.rejectAuth(new Error("蓝牙连接已断开"), "disconnect");
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"), "disconnect");
     this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"), "disconnect");
+    this.rejectAdmin(new Error("蓝牙连接已断开；管理操作结果未知"), "disconnect");
+    this.adminVerified = false;
     const server = this.server;
     if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page",
       connected: !!server?.connected, stage: this.connectionStage, ...context });
     this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
     if (this.notifier && this.listener) this.notifier.removeEventListener("characteristicvaluechanged", this.listener);
-    this.device = null; this.server = null; this.writer = null; this.notifier = null; this.listener = null;
+    this.device = null; this.server = null; this.writer = null; this.notifier = null; this.pairingNotifier = null; this.listener = null;
     if (server?.connected) {
       this.diagnose("gatt-disconnect-call", { reason, stage: this.connectionStage });
       try { server.disconnect(); this.diagnose("gatt-disconnect-result", { connected: server.connected }); }

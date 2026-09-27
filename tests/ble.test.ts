@@ -53,6 +53,9 @@ class FakeWriter extends EventTarget {
       this.notifier.push(`@%DP-117-0-181-${this.reservationCancelAccept ? "1" : "0"}-@`);
       if (this.reservationCancelAccept && this.reservationCancelStatus) this.notifier.push(stateFrame("2"));
     });
+    const adminReplies: Record<string, string> = { "120": "121", "110": "111", "112": "113", "202": "203", "136": "137", "118": "119", "132": "133" };
+    const adminCode = /^@%PD-(\d{3})-/.exec(frame)?.[1];
+    if (adminCode && adminReplies[adminCode]) queueMicrotask(() => this.notifier.push(`@%DP-${adminReplies[adminCode]}-0-181-1-@`));
   }
 }
 class FakeDevice extends EventTarget implements BleDevice {
@@ -96,6 +99,35 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(restored.authorized, true);
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
+});
+test("独立管理员验证后才能执行设置，修改管理员密码立即撤销管理权限", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-test-device");
+  const pairing = new FakeNotifier();
+  Object.defineProperty(pairing, "uuid", { value: "0000ff03-0000-1000-8000-00805f9b34fb" });
+  let pairingNotifications = false;
+  pairing.startNotifications = async () => { pairingNotifications = true; return pairing as unknown as BleCharacteristic; };
+  device.gatt.getPrimaryService = async uuid => {
+    if (uuid.startsWith("0000ff00")) return { getCharacteristics: async () => [device.notifier, device.writer, pairing] as unknown as BleCharacteristic[] };
+    throw new Error("service missing");
+  };
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2);
+  await client.login("12345", true);
+  await tick();
+  assert.throws(() => client.admin("plug-on"), /管理员验证码/);
+  await client.admin("admin-auth", "54321");
+  assert.equal(client.administratorAuthorized, true);
+  await client.admin("plug-on");
+  await client.admin("mute-on");
+  assert.equal(client.pairingAvailable, true);
+  await client.admin("pair");
+  assert.equal(pairingNotifications, true);
+  assert.equal(client.currentStatus?.mode, "2"); // 回执与订阅不能证明设备已进入无感充电模式。
+  await client.admin("admin-password", "12345");
+  assert.equal(client.administratorAuthorized, false);
+  assert.throws(() => client.admin("pair"), /管理员验证码/);
+  client.disconnect();
 });
 test("同一页面断线后点击恢复直接复用设备对象，无需选择器或 getDevices", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();

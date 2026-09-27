@@ -1,6 +1,7 @@
 import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEvent } from "./ble";
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
+import { LocalHistory } from "./history";
 import { showTab, tabIndexForKey } from "./tabs";
 
 declare const __BUILD_VERSION__: string;
@@ -8,7 +9,7 @@ declare const __BUILD_REVISION__: string;
 declare const __BUILD_TIME__: string;
 import { Diagnostics, diagnosticError, type DiagnosticEnvironment } from "./diagnostics";
 import { countdownTo } from "./countdown";
-import { nextMidnight, parseLocalMinute, validateReservation, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
+import { nextMidnight, parseLocalMinute, validateReservation, type AdminAction, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -19,6 +20,9 @@ const text = (id: string, value: string): void => { el(id).textContent = value; 
 text("buildInfo", formatBuildInfo({ version: __BUILD_VERSION__, revision: __BUILD_REVISION__, builtAt: __BUILD_TIME__ }));
 const adapter = (navigator as Navigator & { bluetooth?: BleAdapter }).bluetooth;
 const diagnostics = new Diagnostics();
+let localStorageAccess: Storage | undefined;
+try { localStorageAccess = window.localStorage; } catch { /* 私密模式可能禁止网站存储 */ }
+const history = new LocalHistory(localStorageAccess);
 const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
   diagnostics.add(event, data, level);
   refreshDiagnostics();
@@ -28,9 +32,10 @@ let busy = false;
 let statusAt = 0;
 let staleLoggedFor = 0;
 let reservationResult = "";
+let adminMessage = "";
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
-let confirmedReservation: { deviceId: string; startsAt: number } | null = null;
+let confirmedReservation: { deviceId: string; startsAt: number; source: "session" | "restored" } | null = null;
 const feedback = new FeedbackHistory(100);
 let lastFeedbackPaintAt = 0;
 let feedbackDirty = false;
@@ -38,6 +43,31 @@ let errorDialogs = 0;
 const pad = (value: number): string => String(value).padStart(2, "0");
 function localMinute(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function formatHistoryTime(value: number | null): string {
+  return value && Number.isFinite(value) ? new Date(value).toLocaleString("zh-CN") : "未知";
+}
+function renderHistory(): void {
+  const id = client?.currentDevice?.id || history.latestDeviceId();
+  const charges = id ? history.charges(id) : [];
+  const reservations = id ? history.reservations(id) : [];
+  const show = (boxId: string, entries: string[]): void => {
+    const box = el(boxId);
+    box.replaceChildren();
+    if (!entries.length) { box.textContent = "暂无本网页记录"; return; }
+    const list = document.createElement("ol"); list.className = "history-list";
+    for (const entry of entries) { const item = document.createElement("li"); item.textContent = entry; list.append(item); }
+    box.append(list);
+  };
+  show("localChargeHistory", charges.map(r =>
+    `首次观察到充电：${formatHistoryTime(r.firstSeenAt)}${r.startedAt ? "（观察到准备→充电）" : "（准确开始时间未知）"}\n` +
+    `停止观察：${r.state === "charging" ? "上次观察到充电中，当前需核对" : r.endedAt ? formatHistoryTime(r.endedAt) : "离线期间发生，准确时间未知"}\n` +
+    `已充时长：${r.minutes !== null && Number.isFinite(r.minutes) ? duration(r.minutes) : "未知"} · 电量：${r.energyKWh !== null && Number.isFinite(r.energyKWh) ? `${r.energyKWh.toFixed(1)} kWh` : "未知"}`));
+  const names: Record<string, string> = { accepted: "设备已接受，待核对模式", observed: "曾观察到预约模式", charging: "后续观察到充电中", ended: "后续观察到停止充电", cancelled: "设备已确认取消", replaced: "被本网页新预约替换" };
+  show("localReserveHistory", reservations.map(r =>
+    `提交：${formatHistoryTime(r.submittedAt)} · 预约：${formatHistoryTime(r.startsAt)}\n` +
+    `结束方式：${r.end} · 本地记录：${names[r.state] || "状态未知"}`));
+  text("localHistoryHint", history.available ? "仅存储在此浏览器的网站数据中。" : "浏览器禁止本地存储；记录仅在本次页面有效。");
 }
 function resetReservationStart(): void {
   reservationStartAutomatic = true;
@@ -63,7 +93,7 @@ function endLabel(end: ReservationEnd): string {
 function updateReservationCountdown(): void {
   const box = el("reserveCountdownBox");
   const currentDeviceId = client?.currentDevice?.id;
-  if (!confirmedReservation || currentDeviceId && currentDeviceId !== confirmedReservation.deviceId) { box.hidden = true; return; }
+  if (!client?.authorized || !currentDeviceId || !confirmedReservation || currentDeviceId !== confirmedReservation.deviceId) { box.hidden = true; return; }
   const now = Date.now();
   const status = client?.currentStatus;
   if (client?.authorized && status && now - statusAt < 20000 && status.state === "4") {
@@ -73,7 +103,9 @@ function updateReservationCountdown(): void {
   }
   box.hidden = false;
   text("reserveCountdown", countdownTo(confirmedReservation.startsAt, now));
-  text("reserveCountdownLabel", now < confirmedReservation.startsAt ? "后开始充电（本地时钟估算）" : "预约时间已到，等待设备状态确认");
+  text("reserveCountdownLabel", now < confirmedReservation.startsAt ?
+    confirmedReservation.source === "restored" ? "后开始充电（仅本地记录；设备时间不可核对）" : "后开始充电（本地时钟估算）" :
+    "预约时间已到，等待设备状态确认");
 }
 function environment(): DiagnosticEnvironment {
   const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" :
@@ -90,9 +122,32 @@ const stateName = (status: DeviceStatus | null): string => {
   if (status.state === "4") return "充电中";
   if (status.state === "3") return "设备报出故障";
   if (status.state === "2") return "已就绪";
-  if (status.state === "5") return "充电结束（原小程序标为 ChargEnd）";
+  if (status.state === "5") return "充电结束";
+  if (status.state === "6") return "未插枪";
+  if (status.state === "7") return "配置中";
   return `设备状态 ${status.state || "未知"}（含义未核实）`;
 };
+const stateLabels: Record<string, string> = { "2": "准备", "3": "故障", "4": "充电", "5": "结束", "6": "未插枪", "7": "配置中" };
+const modeLabels: Record<string, string> = { "0": "待机", "1": "VIN", "2": "蓝牙", "3": "预约", "4": "即插即充", "5": "无感充电" };
+const faultLabelsNew: Record<string, string> = {
+  "0000": "工作正常", "0001": "CC1连接异常", "0002": "BMS通信故障", "0003": "BMS通信超时（超时次数大于3次）",
+  "0009": "电子锁故障", "0010": "直流接触器黏连故障", "0012": "急停按钮被按下", "0014": "电池电压与充电机输出范围不匹配",
+  "0018": "模块输出过/欠压", "0030": "直流接触器拒动故障"
+};
+function faultDescription(status: DeviceStatus): string {
+  if (status.protocol === 2) return faultLabelsNew[status.power] || "原小程序未提供该故障码释义";
+  return status.power === "0000" ? "工作正常" : "旧协议的故障释义依设备子型号而异，当前未能判定；请核对原小程序";
+}
+function faultAdvice(status: DeviceStatus): string {
+  if (status.protocol !== 2 || !faultLabelsNew[status.power]) return "当前无法按设备子型号核实排查方法，请核对原小程序或联系售后。";
+  if (status.power === "0000") return "无故障。";
+  if (status.power === "0012") return "原小程序提示：将急停键弹起复位；若仍未解决，请联系售后。";
+  return "原小程序提示：解除电子锁并拔除充电枪，重新插枪并再次启动；若仍未解决，请联系售后。";
+}
+function duration(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes < 0) return "--";
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h ${minutes % 60}min`;
+}
 function paintFeedback(): void {
   const box = el("liveLog");
   const followLatest = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
@@ -122,7 +177,7 @@ function failure(action: string, error: unknown): void {
 function handleEvent(event: ChargerEvent): void {
   if (event.type === "phase") {
     phase = event.phase;
-    if (phase === "offline" || phase === "connecting") reservationResult = "";
+    if (phase === "offline" || phase === "connecting") { reservationResult = ""; adminMessage = ""; }
     diagnostics.add("phase", { phase }); record(event.message);
   }
   if (event.type === "notice") { record(event.message); if (event.severity === "error") showErrorModal(event.message); }
@@ -130,6 +185,14 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
+    const deviceId = client?.currentDevice?.id;
+    if (deviceId) {
+      history.trackStatus(deviceId, event.status);
+      const saved = history.latestReservation(deviceId);
+      if (event.status.mode === "3" && saved && (!confirmedReservation || confirmedReservation.deviceId !== deviceId)) {
+        confirmedReservation = { deviceId, startsAt: saved.startsAt, source: "restored" };
+      }
+    }
     if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
     statusAt = Date.now(); staleLoggedFor = 0; record("收到设备状态通知。", true);
   }
@@ -162,9 +225,18 @@ function render(): void {
   indicator.title = connectionLabel;
   text("liveProtocolName", client?.currentProtocol === 1 ? "旧版协议" : client?.currentProtocol === 2 ? "新版协议" : "等待识别");
   text("liveSoc", status && Number.isFinite(status.soc) ? `${status.soc}%` : "--");
+  el("liveSocRing").style.setProperty("--soc", status && Number.isFinite(status.soc) ? `${Math.max(0, Math.min(100, status.soc))}%` : "0%");
+  text("liveStateCode", status ? stateLabels[status.state] || `状态 ${status.state}` : "--");
+  text("liveMode", status ? modeLabels[status.mode] || `模式 ${status.mode || "未知"}` : "--");
+  text("liveLock", status ? status.lock === "0" ? "断开" : status.lock === "1" ? "闭合" : `状态 ${status.lock}` : "--");
   text("liveEnergy", status && Number.isFinite(status.energyKWh) ? `${status.energyKWh.toFixed(1)} kWh` : "--");
-  text("liveMinutes", status && Number.isFinite(status.minutes) ? `${status.minutes} min` : "--");
-  text("liveElectrical", status ? `电压 ${status.voltage} V · 电流 ${status.currentA ?? "--"} A · 功率原值 ${status.power}（单位未核实）` : "无设备数据");
+  text("liveMinutes", status ? duration(status.minutes) : "--");
+  text("liveRemaining", status ? duration(status.remainingMinutes) : "--");
+  text("liveVoltage", status ? `${status.voltage} V` : "--");
+  text("liveCurrent", status && status.currentA !== null ? `${status.currentA} A` : "--");
+  text("liveFault", status ? status.power || "--" : "--");
+  text("liveElectrical", status ? `故障状态：${faultDescription(status)}（${status.power || "未报告"}）` : "无设备数据");
+  el<HTMLButtonElement>("liveFaultDetail").disabled = !status;
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
   const loginProgress = el("liveLoginProgress");
   loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
@@ -179,6 +251,24 @@ function render(): void {
   el<HTMLButtonElement>("liveChoose").disabled = !supported || busy;
   el<HTMLButtonElement>("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
   el<HTMLButtonElement>("liveForgetPassword").disabled = !client?.rememberedName;
+  const adminPanel = el("adminPanel");
+  adminPanel.hidden = !client?.authorized;
+  const adminReady = !!client?.administratorAuthorized;
+  el("adminAuthBox").hidden = adminReady;
+  el("adminControls").hidden = !adminReady;
+  el<HTMLButtonElement>("adminLogin").disabled = !client?.authorized || !!client.adminPending || busy;
+  for (const id of ["adminPlugOn", "adminPlugOff", "adminChangeBluetoothPassword", "adminChangePassword"])
+    el<HTMLButtonElement>(id).disabled = !adminReady || !fresh || busy || !!client?.adminPending;
+  for (const id of ["adminMuteOn", "adminMuteOff"])
+    el<HTMLButtonElement>(id).disabled = !adminReady || !fresh || busy || !!client?.adminPending || client?.currentProtocol !== 2;
+  el<HTMLButtonElement>("adminPair").disabled = !adminReady || !fresh || busy || !!client?.adminPending || !client?.pairingAvailable;
+  text("adminPairHint", client?.currentProtocol === 2 && !client.pairingAvailable ?
+    "当前连接未发现原小程序所需的 FF03 配对通知特征；不能启动无感配对。" :
+    "仅新版协议有静音和无感配对指令；配对回执不等于手机已完成系统蓝牙配对。");
+  const authMode = el<HTMLSelectElement>("adminAuthMode");
+  authMode.disabled = !adminReady || busy;
+  if (document.activeElement !== authMode) authMode.value = client?.manualBluetoothLogin ? "manual" : "auto";
+  text("adminState", adminMessage || (adminReady ? "管理员已验证；管理操作仍需设备回执。" : "管理员权限未验证。"));
   const reservationBlocked = status ? reservationBlockReason(status) : null;
   el<HTMLButtonElement>("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
   text("reserveSubmit", client?.canCancelReservation ? "修改预约" : "提交预约");
@@ -191,6 +281,7 @@ function render(): void {
     reservationResult || !fresh ? reservationResult || "等待最新设备状态，操作暂不可用。" : status?.mode === "3" ? "设备通知显示预约模式；可修改或取消。" :
     reservationBlocked ? reservationBlocked : client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
   updateReservationCountdown();
+  renderHistory();
 }
 function selectedProtocol(): Version | undefined {
   const value = el<HTMLSelectElement>("liveProtocol").value;
@@ -293,10 +384,14 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
   try {
     if (action === "submit") {
       await client.submitReservation(reservation!);
-      if (deviceId && client.currentDevice?.id === deviceId) confirmedReservation = { deviceId, startsAt: reservation!.start.getTime() };
+      if (deviceId && client.currentDevice?.id === deviceId) {
+        confirmedReservation = { deviceId, startsAt: reservation!.start.getTime(), source: "session" };
+        history.acceptReservation(deviceId, reservation!.start.getTime(), reservation!.end);
+      }
     } else {
       await client.cancelReservation();
       if (confirmedReservation?.deviceId === deviceId) confirmedReservation = null;
+      if (deviceId) history.cancelReservation(deviceId);
     }
     reservationResult = `设备已确认${label}；请核对设备当前预约状态。`;
     record(reservationResult);
@@ -305,6 +400,54 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
     failure(label, error);
   } finally { busy = false; render(); }
 }
+const adminNames: Record<AdminAction, string> = {
+  "admin-auth": "管理员认证", "plug-on": "设置即插即充", "plug-off": "取消即插即充",
+  "mute-on": "设置静音", "mute-off": "取消静音", pair: "开启无感配对窗口",
+  "bluetooth-password": "修改蓝牙验证码", "admin-password": "修改管理员验证码"
+};
+async function runAdmin(action: AdminAction, inputId?: string): Promise<void> {
+  if (!client) return;
+  const label = adminNames[action];
+  const input = inputId ? el<HTMLInputElement>(inputId) : null;
+  const value = input?.value;
+  if (input && (!/^\d{5}$/.test(value ?? "") || action !== "admin-auth" && Number(value) > 65535)) {
+    reportOperationError(`${label}：请输入五位数字${action === "admin-auth" ? "" : "，且数值不大于 65535"}。`); return;
+  }
+  if (action !== "admin-auth") {
+    const warning = action === "plug-on" ? "原小程序提示：即插即充可能被他人使用。" :
+      action === "pair" ? "设备打开配对窗口后，还须在 iOS 系统完成配对；回执不能证明无感充电已经启用。" :
+      action === "bluetooth-password" ? "设备确认后会删除旧的蓝牙验证码缓存，下一次需输入新的验证码。" : "";
+    if (!window.confirm(`确定向真实设备执行「${label}」？${warning}\n仅设备返回匹配回执才视为接受操作。`)) return;
+  }
+  if (input) input.value = "";
+  busy = true; adminMessage = `正在${label}，等待设备回执…`; render();
+  try {
+    await client.admin(action, value);
+    adminMessage = action === "pair" ? "设备已确认开启配对窗口；请在 iOS 系统完成配对并现场核对是否进入无感模式。" :
+      action === "bluetooth-password" ? "设备已确认修改；旧验证码缓存已删除，重新连接时须输入新验证码并由设备验证。" :
+      action === "admin-password" ? "设备已确认修改；原管理员权限已失效，请用新验证码重新验证。" :
+      action === "mute-on" || action === "mute-off" ? "设备已接受静音操作；状态报文不含静音标志，请现场核对。" :
+      action === "admin-auth" ? "设备已确认管理员权限。" : `设备已接受${label}；请等后续设备状态核对。`;
+    record(adminMessage);
+  } catch (error) { adminMessage = `${label}未确认`; failure(label, error); }
+  finally { busy = false; render(); }
+}
+for (const [id, action, input] of [
+  ["adminLogin", "admin-auth", "adminPassword"], ["adminPlugOn", "plug-on"], ["adminPlugOff", "plug-off"],
+  ["adminMuteOn", "mute-on"], ["adminMuteOff", "mute-off"], ["adminPair", "pair"],
+  ["adminChangeBluetoothPassword", "bluetooth-password", "adminNewBluetoothPassword"],
+  ["adminChangePassword", "admin-password", "adminNewPassword"]
+] as const) el(id).addEventListener("click", () => void runAdmin(action, input));
+el("adminAuthMode").addEventListener("change", () => {
+  if (!client?.administratorAuthorized) return;
+  try { client.setManualBluetoothLogin(el<HTMLSelectElement>("adminAuthMode").value === "manual");
+    adminMessage = "已保存本网页认证方式；连接时仍需设备确认蓝牙验证码。"; render(); }
+  catch (error) { failure("保存认证方式", error); }
+});
+el("liveFaultDetail").addEventListener("click", () => {
+  const status = client?.currentStatus;
+  if (status) window.alert(`故障状态：${status.power || "未报告"}\n${faultDescription(status)}\n${faultAdvice(status)}\n仅依据本次设备状态通知。`);
+});
 el("reserveSubmit").addEventListener("click", () => void reserve("submit"));
 el("reserveCancel").addEventListener("click", () => void reserve("cancel"));
 el("liveDisconnect").addEventListener("click", () => { client?.disconnect(); statusAt = 0; render(); });
@@ -313,8 +456,12 @@ el("liveForgetPassword").addEventListener("click", () => {
   client?.forgetPassword(); diagnostics.add("password-forgotten"); record("已删除保存的验证码。"); render();
 });
 el("liveForgetDevice").addEventListener("click", () => {
-  if (!window.confirm("清除本网站保存的全部设备记录和验证码，并断开连接？")) return;
-  client?.forgetDevice(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
+  if (!window.confirm("清除本网站保存的设备记录、验证码及全部本地充电/预约历史，并断开连接？")) return;
+  client?.forgetDevice(); history.clear(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
+});
+el("localHistoryClear").addEventListener("click", () => {
+  if (!window.confirm("确定删除此浏览器中所有设备的本网页充电及预约记录？无法恢复。")) return;
+  history.clear(); confirmedReservation = null; render();
 });
 el("copyDiagnostics").addEventListener("click", async () => {
   const value = diagnostics.exportText(environment());
@@ -352,16 +499,20 @@ const tabPairs = ([
   ["tabFeedback", "tabPanelFeedback"],
   ["tabAbout", "tabPanelAbout"]
 ] as const).map(([tabId, panelId]) => ({ tab: el<HTMLButtonElement>(tabId), panel: el(panelId) }));
-tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
+function activateTab(index: number): void {
+  showTab(tabPairs, index);
+  el("liveTabContent").scrollTop = 0;
+}
+tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => activateTab(index)));
 el("liveTabs").addEventListener("keydown", event => {
   const current = tabPairs.findIndex(({ tab }) => tab === event.target);
   const next = tabIndexForKey(event.key, current, tabPairs.length);
   if (next === null) return;
   event.preventDefault();
-  showTab(tabPairs, next);
+  activateTab(next);
   tabPairs[next].tab.focus();
 });
-showTab(tabPairs, 0);
+activateTab(0);
 resetReservationStart();
 diagnostics.add("app-start", { ...environment(), schema: 4,
   buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeLocal: formatLocalBuildTime(__BUILD_TIME__) });

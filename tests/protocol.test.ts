@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checksum, command, FrameDecoder, nextMidnight, parseLocalMinute, parseNew, parseOld, reservationCommand, syncClock, validateReservation } from "../src/protocol";
+import { adminCommand, checksum, command, FrameDecoder, nextMidnight, parseLocalMinute, parseNew, parseOld, reservationCommand, syncClock, validateReservation } from "../src/protocol";
 
 const withCheck = (body: string): string => body + checksum(body);
 function oldStatus(): string {
@@ -12,6 +12,23 @@ function oldStatus(): string {
   first[18] = second[18] = "6";
   return withCheck(first.join("")) + withCheck(second.join(""));
 }
+test("管理员指令遵循原协议区分，旧版回执须通过双帧校验", () => {
+  assert.match(adminCommand(2, "admin-auth", "12345"), /^@%PD-120-/);
+  assert.match(adminCommand(2, "plug-on"), /^@%PD-110-/);
+  assert.match(adminCommand(2, "mute-on"), /^@%PD-202-/);
+  assert.notEqual(adminCommand(2, "mute-on"), adminCommand(2, "mute-off"));
+  assert.equal(adminCommand(1, "plug-on").length, 20);
+  assert.throws(() => adminCommand(1, "pair"), /旧版协议/);
+  assert.throws(() => adminCommand(2, "bluetooth-password", "99999"), /65535/);
+  assert.deepEqual(parseNew("@%DP-121-0-181-1-@"), { type: "admin", protocol: 2, action: "admin-auth", ok: true, code: "1" });
+  const first = [..."0".repeat(19)], second = [..."0".repeat(19)];
+  first[0] = second[0] = first[1] = second[1] = "8";
+  first[3] = second[3] = first[18] = second[18] = "6";
+  first[9] = second[9] = "2";
+  const reply = withCheck(first.join("")) + withCheck(second.join(""));
+  assert.deepEqual(parseOld(reply), { type: "admin", protocol: 1, action: "plug-on", ok: true, code: "22" });
+  assert.equal(parseOld(reply.slice(0, -1) + "1"), null);
+});
 test("两套授权/充停命令只接受五位验证码", () => {
   assert.equal(command(2, "auth", "12345"), "@%PD-100-0-181-12345-@");
   assert.equal(command(1, "auth", "12345"), withCheck("8010000012345000006"));

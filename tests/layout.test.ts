@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("四个标签固定在底部、连接灯在标题内，充电与预约同页", () => {
+test("四个标签占据容器底行、内容区独立滚动，充电与预约同页", () => {
   const html = readFileSync("index.html", "utf8");
   assert.match(html, /id="liveTabs" role="tablist"/);
   for (const [tab, panel] of [
@@ -13,7 +13,11 @@ test("四个标签固定在底部、连接灯在标题内，充电与预约同�
     assert.match(html, new RegExp(`id="${panel}"[^>]*aria-labelledby="${tab}"`));
   }
   assert.match(html, /id="tabConnection"[^>]*><span class="connection-dot" id="livePhase"/);
-  assert.match(html, /\.tabs \{ position:fixed; bottom:0;/);
+  assert.match(html, /main \{ position:fixed; inset:0;[^}]*display:flex; flex-direction:column;/);
+  assert.match(html, /\.live \{[^}]*display:flex; flex-direction:column;[^}]*overflow:hidden;/);
+  assert.match(html, /\.screen \{[^}]*flex:1; min-height:0; overflow-y:auto;/);
+  assert.match(html, /\.tabs \{ flex:none; width:100%; display:grid;/);
+  assert.ok(html.indexOf('id="liveTabContent"') < html.indexOf('id="tabPanelConnection"'));
   assert.ok(html.indexOf('id="liveTabs"') > html.indexOf('id="tabPanelAbout"'));
   assert.match(html, /id="tabPanelCharge"[^>]*hidden>/);
   assert.match(html, /id="tabPanelFeedback"[^>]*hidden>/);
@@ -42,4 +46,5 @@ test("清空诊断的点击事件没有二次确认，错误处理调用弹框",
   assert.match(source.slice(clearStart, clearEnd), /diagnostics\.clear\(\); feedback\.clear\(\)/);
   assert.match(source, /function reportOperationError\(message: string\): void \{ record\(message\); showErrorModal\(message\); \}/);
   assert.match(source, /if \(event\.severity === "error"\) showErrorModal\(event\.message\)/);
+  assert.match(source, /el\("liveTabContent"\)\.scrollTop = 0/);
 });

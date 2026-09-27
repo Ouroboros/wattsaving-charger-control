@@ -1,6 +1,7 @@
 // 旧小程序 pages/password/password.js、pages/index/index.js、pages/reserve/reserve.js 中的报文。
 export type Version = 1 | 2;
 export type ControlAction = "start" | "stop" | "unlock";
+export type AdminAction = "admin-auth" | "plug-on" | "plug-off" | "mute-on" | "mute-off" | "pair" | "bluetooth-password" | "admin-password";
 export type ReservationEnd = { kind: "full" } | { kind: "time"; minutes: number } | { kind: "energy"; kWh: number };
 export interface Reservation { start: Date; end: ReservationEnd; }
 export type ReservationAction = "submit" | "cancel";
@@ -39,6 +40,7 @@ export type Frame = DeviceStatus |
   { type: "auth"; protocol: Version; ok: boolean; code: string } |
   { type: "ack"; protocol: 2; action: "start" | "stop"; ok: boolean; code: string } |
   { type: "reservation"; protocol: Version; action: ReservationAction; ok: boolean; code: string } |
+  { type: "admin"; protocol: Version; action: AdminAction | "mute"; ok: boolean; code: string } |
   { type: "unknown"; protocol: 2; code: string };
 
 const commands: Record<Version, Record<ControlAction, string>> = {
@@ -59,6 +61,27 @@ export function command(protocol: Version, action: "auth" | ControlAction, passw
     return protocol === 1 ? appendChecksum(`80100000${password}000006`) : `@%PD-100-0-181-${password}-@`;
   }
   return commands[protocol][action];
+}
+export function adminCommand(protocol: Version, action: AdminAction, password?: string): string {
+  const needsValue = action === "admin-auth" || action === "bluetooth-password" || action === "admin-password";
+  if (needsValue && !/^\d{5}$/.test(password ?? "")) throw new Error("管理员验证或新密码须为五位数字");
+  if (action !== "admin-auth" && needsValue && Number(password) > 65535) throw new Error("新密码不能大于 65535");
+  if (!needsValue && password !== undefined) throw new Error("此管理操作不得携带密码");
+  if (protocol === 1) {
+    if (["mute-on", "mute-off", "pair"].includes(action)) throw new Error("旧版协议没有此管理功能");
+    if (needsValue) {
+      const selector = action === "admin-auth" ? "1" : action === "bluetooth-password" ? "2" : "4";
+      return appendChecksum(`8010${selector}000${password}000006`);
+    }
+    const selector = action === "plug-on" ? "8" : "9";
+    return appendChecksum(`801${selector}6${"0".repeat(13)}6`);
+  }
+  const codes: Record<AdminAction, string> = {
+    "admin-auth": "120", "plug-on": "110", "plug-off": "112", "mute-on": "202", "mute-off": "202",
+    "pair": "136", "bluetooth-password": "118", "admin-password": "132"
+  };
+  const value = action === "mute-on" || action === "pair" ? "1" : action === "mute-off" ? "0" : needsValue ? password! : "@";
+  return action === "plug-on" || action === "plug-off" ? `@%PD-${codes[action]}-0-181-@` : `@%PD-${codes[action]}-0-181-${value}-@`;
 }
 export function syncClock(protocol: Version, date = new Date()): string {
   const parts = [...calendar(date), pad(date.getSeconds())];
@@ -112,6 +135,8 @@ export function parseNew(frame: string): Frame | null {
   if (code === "101") return { type: "auth", protocol: 2, ok: parts[4] === "1", code: parts[4] ?? "" };
   if (code === "103" || code === "105") return { type: "ack", protocol: 2, action: code === "103" ? "start" : "stop", ok: parts[4] === "1", code: parts[4] ?? "" };
   if ((code === "115" || code === "117") && (parts[4] === "0" || parts[4] === "1")) return { type: "reservation", protocol: 2, action: code === "115" ? "submit" : "cancel", ok: parts[4] === "1", code: parts[4] };
+  const adminCodes: Record<string, AdminAction | "mute"> = { "121": "admin-auth", "111": "plug-on", "113": "plug-off", "119": "bluetooth-password", "133": "admin-password", "203": "mute", "137": "pair" };
+  if (adminCodes[code] && (parts[4] === "0" || parts[4] === "1")) return { type: "admin", protocol: 2, action: adminCodes[code], ok: parts[4] === "1", code: parts[4] };
   if (code === "107") return status(2, parts.slice(4, 17));
   return { type: "unknown", protocol: 2, code: code ?? "" };
 }
@@ -125,7 +150,17 @@ export function parseOld(frame: string): Frame | null {
     return { type: "auth", protocol: 1, ok: code === "33", code };
   }
   if (header === "88" && first[1] + second[1] === "88" && trailer === "66") {
-    const kind = first[3] + second[3], code = first[5] + second[5];
+    const kind = first[3] + second[3];
+    const adminKinds: Record<string, [AdminAction, number]> = {
+      "44": ["admin-auth", 7], "55": ["bluetooth-password", 8], "66": ["plug-on", 9],
+      "77": ["plug-off", 10], "88": ["admin-password", 11]
+    };
+    const admin = adminKinds[kind];
+    if (admin) {
+      const response = first[admin[1]] + second[admin[1]];
+      return { type: "admin", protocol: 1, action: admin[0], ok: response === "33" && kind === "44" || response === "22" && kind !== "44", code: response };
+    }
+    const code = first[5] + second[5];
     if (kind === "22" && ["55", "66"].includes(code)) return { type: "reservation", protocol: 1, action: "submit", ok: code === "55", code };
     if (kind === "33" && ["77", "88"].includes(code)) return { type: "reservation", protocol: 1, action: "cancel", ok: code === "77", code };
   }
