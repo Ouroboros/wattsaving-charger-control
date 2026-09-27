@@ -297,26 +297,39 @@
   };
 
   // src/experimental.ts
-  function experimentalGearCommand(pile, gun, gear) {
-    if (!/^[0-9a-fA-F]{8}$/.test(pile)) throw new Error("\u6869\u7F16\u7801\u987B\u4E3A\u4ECE App \u5B9E\u5305\u6838\u5B9E\u7684 8 \u4F4D\u5341\u516D\u8FDB\u5236\u6570");
-    if (!/^[0-9a-fA-F]{2}$/.test(gun)) throw new Error("\u67AA\u53F7\u987B\u4E3A\u4ECE App \u5B9E\u5305\u6838\u5B9E\u7684 2 \u4F4D\u5341\u516D\u8FDB\u5236\u6570");
-    if (!Number.isInteger(gear) || gear < 0 || gear > 3) throw new Error("\u5B9E\u9A8C\u6027\u6863\u4F4D\u4EC5\u5141\u8BB8 0\uFF5E3");
-    const frame = new Uint8Array(new ArrayBuffer(11));
-    frame.set([35, 11, 50]);
+  function byteHex(value) {
+    return value.toString(16).padStart(2, "0").toUpperCase();
+  }
+  function frameFor(pile, gun, opcode, parameter) {
+    if (!/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun)) throw new Error("\u7F3A\u5C11\u8BBE\u5907\u72B6\u6001\u5E27\u4E2D\u7684\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0C\u7981\u6B62\u731C\u6D4B\u62A5\u6587\u5B57\u6BB5");
+    const frame = new Uint8Array(new ArrayBuffer(parameter === void 0 ? 10 : 11));
+    frame.set([35, frame.length, opcode]);
     for (let i = 0; i < 4; i++) frame[3 + i] = Number.parseInt(pile.slice(i * 2, i * 2 + 2), 16);
     frame[7] = Number.parseInt(gun, 16);
-    frame[8] = gear;
-    frame[9] = 102;
-    frame[10] = frame.slice(0, 10).reduce((sum, byte) => sum + byte, 0) & 255;
+    if (parameter !== void 0) frame[8] = parameter;
+    frame[frame.length - 2] = 102;
+    frame[frame.length - 1] = frame.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 255;
     return frame;
+  }
+  function experimentalGearCommand(pile, gun, gear) {
+    if (!Number.isInteger(gear) || gear < 0 || gear > 3) throw new Error("\u5B9E\u9A8C\u6027\u6863\u4F4D\u4EC5\u5141\u8BB8 0\uFF5E3");
+    return frameFor(pile, gun, 50, gear);
+  }
+  function experimentalQueryCommand(pile, gun, query) {
+    if (query !== "vin-list" && query !== "network-info") throw new Error("\u672A\u77E5\u7684 APP \u67E5\u8BE2\u64CD\u4F5C");
+    return frameFor(pile, gun, query === "vin-list" ? 37 : 68);
   }
   function parseExperimentalFrame(bytes) {
     if (bytes.length < 5 || bytes.length !== bytes[1] || bytes[0] !== 35 || bytes[bytes.length - 2] !== 102 || (bytes.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 255) !== bytes[bytes.length - 1]) return null;
     if (bytes[2] === 130 && bytes.length >= 11) return { type: "gear-reply", code: bytes[8], accepted: bytes[8] === 1 };
+    if (bytes[2] === 117 && bytes.length >= 11) return { type: "vin-list-reply", accepted: bytes[8] === 1 };
+    if (bytes[2] === 148 && bytes.length >= 5) return { type: "network-info-reply" };
     if (bytes[2] === 84 && bytes.length >= 55) return {
       type: "power-report",
       powerTenths: bytes[50] | bytes[51] << 8,
-      gear: bytes[52]
+      gear: bytes[52],
+      pile: [...bytes.slice(3, 7)].map(byteHex).join(""),
+      gun: byteHex(bytes[7])
     };
     return null;
   }
@@ -339,7 +352,7 @@
           }
           if (this.buffer.length < 2) break;
           const length = this.buffer[1];
-          if (length < 5 || length > 128) {
+          if (length < 5) {
             text2.push(this.buffer.shift());
             continue;
           }
@@ -467,6 +480,8 @@
       __publicField(this, "pendingReservation", null);
       __publicField(this, "pendingAdmin", null);
       __publicField(this, "pendingGear", null);
+      __publicField(this, "pendingQuery", null);
+      __publicField(this, "binaryIdentity", null);
       __publicField(this, "adminVerified", false);
       __publicField(this, "reservationAccepted", null);
       __publicField(this, "fallbackVault", { lastId: "", devices: {} });
@@ -531,7 +546,16 @@
       return !!this.pendingAdmin;
     }
     get experimentalPending() {
-      return !!this.pendingGear;
+      return !!(this.pendingGear || this.pendingQuery);
+    }
+    get experimentalIdentityReady() {
+      if (!this.authorized || !this.binaryIdentity || this.binaryIdentity.epoch !== this.epoch) return false;
+      const age = Date.now() - this.binaryIdentity.at;
+      return age >= 0 && age < 2e4;
+    }
+    experimentalIdentity() {
+      if (!this.experimentalIdentityReady || !this.binaryIdentity) throw new Error("\u5F53\u524D\u8BBE\u5907\u672A\u63D0\u4F9B\u8FD1\u671F\u6821\u9A8C\u6709\u6548\u7684 54 \u72B6\u6001\u5E27\uFF1B\u4E0D\u80FD\u731C\u6D4B\u6869\u7F16\u7801\u548C\u67AA\u53F7");
+      return this.binaryIdentity;
     }
     get administratorAuthorized() {
       return this.authorized && this.adminVerified;
@@ -995,20 +1019,41 @@
     }
     async refresh() {
       if (!this.authorized || !this.protocol) throw new Error("\u8BF7\u5148\u901A\u8FC7\u8BBE\u5907\u6388\u6743");
-      if (this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("\u6B63\u5728\u7B49\u5F85\u8BBE\u5907\u64CD\u4F5C\u56DE\u6267\uFF0C\u8BF7\u52FF\u540C\u65F6\u53D1\u9001\u540C\u6B65\u6307\u4EE4");
+      if (this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u6B63\u5728\u7B49\u5F85\u8BBE\u5907\u64CD\u4F5C\u56DE\u6267\uFF0C\u8BF7\u52FF\u540C\u65F6\u53D1\u9001\u540C\u6B65\u6307\u4EE4");
       await this.write(syncClock(this.protocol), "clock-sync");
       this.emit({ type: "notice", message: "\u5DF2\u53D1\u9001\u8BBE\u5907\u65F6\u949F\u540C\u6B65\u5E27\uFF0C\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002" });
     }
-    experimentalGear(pile, gun, gear) {
+    experimentalGear(gear) {
       if (!this.authorized || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u987B\u5148\u53D6\u5F97\u8FD1\u671F\u8BBE\u5907\u6388\u6743\u72B6\u6001\uFF1B\u4E0D\u80FD\u51ED\u65E7\u72B6\u6001\u5C1D\u8BD5\u6863\u4F4D");
-      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
+      const { pile, gun } = this.experimentalIdentity();
       const bytes = experimentalGearCommand(pile, gun, gear);
       this.diagnose("experimental-gear-request", { gear, bytes: bytes.length });
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.rejectExperimental(new Error("\u672A\u540C\u65F6\u6536\u5230 82/01 \u56DE\u6267\u548C 54 \u6863\u4F4D\u72B6\u6001\uFF1B\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u73B0\u573A\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 12e3);
-        this.pendingGear = { gear, ack: false, observed: false, resolve, reject, timer };
+        this.pendingGear = { gear, pile, gun, ack: false, observed: false, resolve, reject, timer };
         void this.writeBytes(bytes, "experimental-gear").catch((error) => this.rejectExperimental(new Error(`\u53D1\u9001\u5B9E\u9A8C\u6027\u6863\u4F4D\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
+    }
+    experimentalQuery(query) {
+      if (!this.authorized) throw new Error("\u987B\u5148\u53D6\u5F97\u8BBE\u5907\u84DD\u7259\u6388\u6743");
+      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
+      const { pile, gun } = this.experimentalIdentity();
+      const bytes = experimentalQueryCommand(pile, gun, query);
+      this.diagnose("experimental-query-request", { query, bytes: bytes.length });
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => this.rejectQuery(new Error("\u672A\u6536\u5230\u5BF9\u5E94\u8BBE\u5907\u56DE\u62A5\uFF1B\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u65E7\u56FA\u4EF6\u4E0D\u652F\u6301\uFF0C\u8BF7\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 1e4);
+        this.pendingQuery = { query, resolve, reject, timer };
+        void this.writeBytes(bytes, `experimental-query-${query}`).catch((error) => this.rejectQuery(new Error(`\u53D1\u9001 APP \u67E5\u8BE2\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
+      });
+    }
+    rejectQuery(error, reason) {
+      const pending = this.pendingQuery;
+      if (!pending) return;
+      this.pendingQuery = null;
+      clearTimeout(pending.timer);
+      this.diagnose("experimental-query-unconfirmed", { query: pending.query, reason }, "warn");
+      pending.reject(error);
     }
     rejectExperimental(error, reason) {
       const pending = this.pendingGear;
@@ -1028,7 +1073,7 @@
     }
     control(action) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
-      if (this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const s = this.latest;
       if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("\u8BBE\u5907\u5F53\u524D\u4E0D\u6EE1\u8DB3\u542F\u52A8\u6761\u4EF6\uFF1A\u9700\u5C31\u7EEA\u3001\u63D2\u67AA\u3001\u65E0\u9884\u7EA6\u6216\u5373\u63D2\u5373\u5145\u51B2\u7A81");
       if (action === "stop" && s.state !== "4") throw new Error("\u53EA\u6709\u5145\u7535\u4E2D\u624D\u80FD\u505C\u6B62");
@@ -1044,7 +1089,7 @@
     admin(action, password) {
       if (!this.authorized || !this.protocol || !this.device) throw new Error("\u8BF7\u5148\u8FDE\u63A5\u5E76\u901A\u8FC7\u8BBE\u5907\u84DD\u7259\u6388\u6743");
       if (action !== "admin-auth" && !this.adminVerified) throw new Error("\u8BF7\u5148\u4F7F\u7528\u72EC\u7ACB\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\u53D6\u5F97\u8BBE\u5907\u786E\u8BA4");
-      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
       if (action !== "admin-auth" && (!this.latest || Date.now() - this.latestAt > 2e4)) throw new Error("\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF1B\u7BA1\u7406\u64CD\u4F5C\u9700\u8981\u6700\u65B0\u8BBE\u5907\u72B6\u6001");
       const status2 = this.latest;
       if (action === "plug-on" && (status2?.mode === "3" || status2?.mode === "5")) throw new Error("\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u6216\u65E0\u611F\u5145\u7535\u6A21\u5F0F");
@@ -1074,7 +1119,7 @@
     }
     reserve(action, reservation) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
-      if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin || this.pendingGear) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
+      if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const status2 = this.latest;
       if (action === "submit") {
         const blocked = reservationBlockReason(status2);
@@ -1147,12 +1192,26 @@
         return;
       }
       if (frame.type === "power-report") {
+        this.binaryIdentity = { pile: frame.pile, gun: frame.gun, at: Date.now(), epoch: this.epoch };
         this.emit({ type: "experimental-power", gear: frame.gear, powerTenths: frame.powerTenths });
         const pending2 = this.pendingGear;
-        if (pending2 && frame.gear === pending2.gear) {
+        if (pending2 && frame.gear === pending2.gear && frame.pile === pending2.pile && frame.gun === pending2.gun) {
           pending2.observed = true;
           this.confirmExperimental();
         }
+        return;
+      }
+      if (frame.type === "vin-list-reply" || frame.type === "network-info-reply") {
+        const pending2 = this.pendingQuery;
+        if (!pending2 || frame.type !== (pending2.query === "vin-list" ? "vin-list-reply" : "network-info-reply")) {
+          this.diagnose("experimental-reply-ignored", { reason: "query-mismatch-or-no-pending" });
+          return;
+        }
+        this.pendingQuery = null;
+        clearTimeout(pending2.timer);
+        const result = frame.type === "vin-list-reply" ? frame.accepted ? "accepted" : "rejected" : "received";
+        this.diagnose("experimental-query-reply", { query: pending2.query, result });
+        pending2.resolve(result);
         return;
       }
       const pending = this.pendingGear;
@@ -1350,6 +1409,8 @@
       this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectAdmin(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u7BA1\u7406\u64CD\u4F5C\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectExperimental(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6863\u4F4D\u64CD\u4F5C\u7ED3\u679C\u672A\u77E5"), "disconnect");
+      this.rejectQuery(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u67E5\u8BE2\u7ED3\u679C\u672A\u77E5"), "disconnect");
+      this.binaryIdentity = null;
       this.adminVerified = false;
       const server = this.server;
       if (this.device || server) this.diagnose("disconnect", {
@@ -1451,7 +1512,7 @@
   // src/history.ts
   var KEY3 = "wattsaving-local-history-v1";
   var LIMIT = 100;
-  var empty = () => ({ charges: [], reservations: [] });
+  var empty = () => ({ reservations: [] });
   var finiteTime = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
   var deviceRecord = (v) => !!v && typeof v === "object" && typeof v.id === "string" && typeof v.deviceId === "string";
   var LocalHistory = class {
@@ -1461,19 +1522,27 @@
       __publicField(this, "lastLive", /* @__PURE__ */ new Map());
       __publicField(this, "available");
       let available = !!storage;
+      let needsMigration = false;
       try {
         const raw = storage?.getItem(KEY3);
         if (raw) {
           const parsed = JSON.parse(raw);
           if (parsed && typeof parsed === "object") {
             const obj = parsed;
-            this.data.charges = Array.isArray(obj.charges) ? obj.charges.filter(deviceRecord).slice(0, LIMIT) : [];
             this.data.reservations = Array.isArray(obj.reservations) ? obj.reservations.filter(deviceRecord).slice(0, LIMIT) : [];
+            needsMigration = "charges" in obj;
           }
         }
       } catch {
         available = false;
         this.data = empty();
+      }
+      if (needsMigration) {
+        try {
+          storage?.setItem(KEY3, JSON.stringify(this.data));
+        } catch {
+          available = false;
+        }
       }
       this.available = available;
     }
@@ -1483,15 +1552,11 @@
       } catch {
       }
     }
-    charges(deviceId) {
-      return this.data.charges.filter((r) => r.deviceId === deviceId);
-    }
     reservations(deviceId) {
       return this.data.reservations.filter((r) => r.deviceId === deviceId);
     }
     latestDeviceId() {
-      const charge = this.data.charges[0], reservation = this.data.reservations[0];
-      return !charge ? reservation?.deviceId || null : !reservation || charge.firstSeenAt >= reservation.submittedAt ? charge.deviceId : reservation.deviceId;
+      return this.data.reservations[0]?.deviceId || null;
     }
     latestReservation(deviceId) {
       return this.reservations(deviceId).find((r) => ["accepted", "observed", "charging"].includes(r.state) && finiteTime(r.startsAt));
@@ -1500,33 +1565,6 @@
       const previous = this.lastLive.get(deviceId);
       this.lastLive.set(deviceId, status2.state);
       let changed = false;
-      const active = this.data.charges.find((r) => r.deviceId === deviceId && r.state === "charging");
-      if (status2.state === "4") {
-        if (!active) {
-          this.data.charges.unshift({
-            id: String(now),
-            deviceId,
-            startedAt: previous === "2" ? now : null,
-            firstSeenAt: now,
-            endedAt: null,
-            state: "charging",
-            energyKWh: Number.isFinite(status2.energyKWh) ? status2.energyKWh : null,
-            minutes: Number.isFinite(status2.minutes) ? status2.minutes : null
-          });
-          this.data.charges = this.data.charges.slice(0, LIMIT);
-          changed = true;
-        } else if (active.energyKWh !== status2.energyKWh || active.minutes !== status2.minutes) {
-          active.energyKWh = Number.isFinite(status2.energyKWh) ? status2.energyKWh : active.energyKWh;
-          active.minutes = Number.isFinite(status2.minutes) ? status2.minutes : active.minutes;
-          changed = true;
-        }
-      } else if (active) {
-        active.state = "ended";
-        active.endedAt = previous === "4" ? now : null;
-        active.energyKWh = Number.isFinite(status2.energyKWh) ? status2.energyKWh : active.energyKWh;
-        active.minutes = Number.isFinite(status2.minutes) ? status2.minutes : active.minutes;
-        changed = true;
-      }
       const reservation = this.latestReservation(deviceId);
       if (reservation) {
         let state = reservation.state;
@@ -1607,7 +1645,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "8f66f22", builtAt: "2026-09-27T18:10:52.252Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "72d07da", builtAt: "2026-09-27T18:55:00.692Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var localStorageAccess;
@@ -1627,6 +1665,7 @@
   var reservationResult = "";
   var adminMessage = "";
   var experimentResult = "";
+  var experimentQueryResult = "";
   var experimentReport = null;
   var lastBlockedReservation = "";
   var reservationStartAutomatic = true;
@@ -1644,7 +1683,6 @@
   }
   function renderHistory() {
     const id = client?.currentDevice?.id || history.latestDeviceId();
-    const charges = id ? history.charges(id) : [];
     const reservations = id ? history.reservations(id) : [];
     const show = (boxId, entries) => {
       const box = el(boxId);
@@ -1662,9 +1700,6 @@
       }
       box.append(list);
     };
-    show("localChargeHistory", charges.map((r) => `\u9996\u6B21\u89C2\u5BDF\u5230\u5145\u7535\uFF1A${formatHistoryTime(r.firstSeenAt)}${r.startedAt ? "\uFF08\u89C2\u5BDF\u5230\u51C6\u5907\u2192\u5145\u7535\uFF09" : "\uFF08\u51C6\u786E\u5F00\u59CB\u65F6\u95F4\u672A\u77E5\uFF09"}
-\u505C\u6B62\u89C2\u5BDF\uFF1A${r.state === "charging" ? "\u4E0A\u6B21\u89C2\u5BDF\u5230\u5145\u7535\u4E2D\uFF0C\u5F53\u524D\u9700\u6838\u5BF9" : r.endedAt ? formatHistoryTime(r.endedAt) : "\u79BB\u7EBF\u671F\u95F4\u53D1\u751F\uFF0C\u51C6\u786E\u65F6\u95F4\u672A\u77E5"}
-\u5DF2\u5145\u65F6\u957F\uFF1A${r.minutes !== null && Number.isFinite(r.minutes) ? duration(r.minutes) : "\u672A\u77E5"} \xB7 \u7535\u91CF\uFF1A${r.energyKWh !== null && Number.isFinite(r.energyKWh) ? `${r.energyKWh.toFixed(1)} kWh` : "\u672A\u77E5"}`));
     const names = { accepted: "\u8BBE\u5907\u5DF2\u63A5\u53D7\uFF0C\u5F85\u6838\u5BF9\u6A21\u5F0F", observed: "\u66FE\u89C2\u5BDF\u5230\u9884\u7EA6\u6A21\u5F0F", charging: "\u540E\u7EED\u89C2\u5BDF\u5230\u5145\u7535\u4E2D", ended: "\u540E\u7EED\u89C2\u5BDF\u5230\u505C\u6B62\u5145\u7535", cancelled: "\u8BBE\u5907\u5DF2\u786E\u8BA4\u53D6\u6D88", replaced: "\u88AB\u672C\u7F51\u9875\u65B0\u9884\u7EA6\u66FF\u6362" };
     show("localReserveHistory", reservations.map((r) => `\u63D0\u4EA4\uFF1A${formatHistoryTime(r.submittedAt)} \xB7 \u9884\u7EA6\uFF1A${formatHistoryTime(r.startsAt)}
 \u7ED3\u675F\u65B9\u5F0F\uFF1A${r.end} \xB7 \u672C\u5730\u8BB0\u5F55\uFF1A${names[r.state] || "\u72B6\u6001\u672A\u77E5"}`));
@@ -1796,9 +1831,8 @@
         reservationResult = "";
         adminMessage = "";
         experimentResult = "";
+        experimentQueryResult = "";
         experimentReport = null;
-        el("experimentPile").value = "";
-        el("experimentGun").value = "";
       }
       diagnostics.add("phase", { phase });
       record(event.message);
@@ -1883,9 +1917,11 @@
     text("experimentReportedPower", reportFresh ? String(report.powerTenths / 10) : "--");
     text("experimentReportAge", !report ? "\u5C1A\u672A\u6536\u5230\u6709\u6548\u7684\u4E8C\u8FDB\u5236 54 \u901A\u77E5\u3002" : reportFresh ? `\u6536\u5230\u8BBE\u5907 54 \u901A\u77E5\uFF08${new Date(report.at).toLocaleTimeString("zh-CN")}\uFF09\uFF1B\u4EC5\u4E3A\u88AB\u52A8\u8BFB\u53D6\u3002` : "\u4E0A\u6B21 54 \u901A\u77E5\u5DF2\u8FC7\u671F\uFF1B\u5F53\u524D\u529F\u7387\u548C\u6863\u4F4D\u672A\u77E5\u3002");
     text("experimentResult", experimentResult || "\u5C1A\u672A\u6267\u884C\u5B9E\u9A8C\u64CD\u4F5C\u3002");
-    const pile = el("experimentPile").value;
-    const gun = el("experimentGun").value;
-    el("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending || !/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun);
+    text("experimentQueryResult", experimentQueryResult || "\u5C1A\u672A\u53D1\u8D77 APP \u67E5\u8BE2\u3002");
+    text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 54 \u901A\u77E5\u53D6\u5F97\u6869\u7F16\u7801\u4E0E\u67AA\u53F7\uFF1B\u4E0D\u5C55\u793A\u3001\u4E0D\u4FDD\u5B58\u3002" : "\u5C1A\u65E0\u5F53\u524D\u8BBE\u5907\u8FD1\u671F\u6709\u6548\u7684 54 \u901A\u77E5\uFF1B\u4E0D\u53EF\u731C\u6D4B\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0C\u5B9E\u9A8C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002");
+    el("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending || !client.experimentalIdentityReady;
+    for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
+      el(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
     const loginProgress = el("liveLoginProgress");
     loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
     if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "\u6B63\u5728\u81EA\u52A8\u767B\u5F55\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026" : "\u6B63\u5728\u9A8C\u8BC1\u9A8C\u8BC1\u7801\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026");
@@ -1935,19 +1971,19 @@
     if (!client) return;
     void client.chooseDevice(selectedProtocol()).catch((error) => failure("\u9009\u62E9/\u8FDE\u63A5", error));
   });
-  async function reconnectLast(source) {
+  async function reconnectLast() {
     if (!client || busy) return;
-    diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
+    diagnostics.add("restore-request", { source: "button", remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
     busy = true;
     render();
     const dialogsBefore = errorDialogs;
     try {
       const found = await client.restore();
-      diagnostics.add("restore-finish", { source, discovered: found });
+      diagnostics.add("restore-finish", { source: "button", discovered: found });
       if (!found && errorDialogs === dialogsBefore) {
         const explanation = "Bluefy \u672A\u8FD4\u56DE\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\uFF1B\u7F51\u9875\u4E0D\u80FD\u4EC5\u51ED\u540D\u79F0\u6216 ID \u8FDE\u63A5\uFF0C\u8BF7\u7528\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u91CD\u65B0\u6388\u6743\u3002";
         record(explanation);
-        if (source === "button") showErrorModal(explanation);
+        showErrorModal(explanation);
       }
     } catch (error) {
       failure("\u6062\u590D\u8BBE\u5907", error);
@@ -1957,7 +1993,7 @@
     }
   }
   el("liveRestore").addEventListener("click", () => {
-    void reconnectLast("button");
+    void reconnectLast();
   });
   el("liveProtocol").addEventListener("change", () => {
     const version = selectedProtocol();
@@ -1991,28 +2027,16 @@
     }
     void client.refresh().catch((error) => failure("\u540C\u6B65\u72B6\u6001", error));
   });
-  for (const id of ["experimentPile", "experimentGun"]) el(id).addEventListener("input", render);
   el("experimentSend").addEventListener("click", () => {
-    if (!client || busy || !client.authorized || !client.currentStatus || Date.now() - statusAt >= 2e4) return;
-    const pile = el("experimentPile").value;
-    const gun = el("experimentGun").value;
+    if (!client || busy || !client.authorized || !client.experimentalIdentityReady || !client.currentStatus || Date.now() - statusAt >= 2e4) return;
     const gear = Number(el("experimentGear").value);
-    let packet;
-    try {
-      packet = experimentalGearCommand(pile, gun, gear);
-    } catch (error) {
-      reportOperationError(errorMessage(error));
-      return;
-    }
-    const hex = [...packet].map((byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
     if (!window.confirm(`\u5B9E\u9A8C\u547D\u4EE4\uFF0C\u65E7\u8BBE\u5907\u672A\u9A8C\u8BC1\u3002\u6863\u4F4D ${gear} \u4E0E 22\uFF0F7\uFF0F11\uFF0F16 kW \u7684\u5BF9\u5E94\u5173\u7CFB\u672A\u77E5\u3002
-\u8BF7\u786E\u8BA4\u6869\u7F16\u7801\u548C\u67AA\u53F7\u5C5E\u4E8E\u5F53\u524D\u8BBE\u5907\uFF0C\u4E14\u5F53\u524D\u53EF\u73B0\u573A\u6838\u5BF9\u3002
-\u5C06\u53D1\u9001\u539F\u59CB\u5B57\u8282\uFF1A${hex}
+\u8BBE\u5907\u5B57\u6BB5\u4EC5\u4ECE\u5F53\u524D\u8FDE\u63A5\u7684\u6709\u6548 54 \u901A\u77E5\u81EA\u52A8\u53D6\u5F97\uFF0C\u4E0D\u5C55\u793A\u539F\u59CB\u62A5\u6587\u3002
 \u4EC5 82/01 \u52A0 54 \u72B6\u6001\u5339\u914D\u624D\u663E\u793A\u53CC\u91CD\u786E\u8BA4\uFF1B\u65E0\u81EA\u52A8\u91CD\u8BD5\u3002\u7EE7\u7EED\u5417\uFF1F`)) return;
     busy = true;
     experimentResult = `\u5DF2\u8BF7\u6C42\u6863\u4F4D ${gear}\uFF0C\u7B49\u5F85\u8BBE\u5907 82 \u56DE\u6267\u53CA 54 \u72B6\u6001\u2026`;
     render();
-    void client.experimentalGear(pile, gun, gear).then(() => {
+    void client.experimentalGear(gear).then(() => {
       experimentResult = `\u8BBE\u5907 82/01 \u5DF2\u63A5\u53D7\u300154 \u5DF2\u62A5\u544A\u6863\u4F4D ${gear}\uFF1B\u5B9E\u9645\u8F93\u51FA\u529F\u7387\u987B\u73B0\u573A\u6838\u5BF9\u3002`;
     }, (error) => {
       experimentResult = `\u6863\u4F4D ${gear} \u672A\u5F97\u5230\u53CC\u91CD\u786E\u8BA4\uFF1A${errorMessage(error)}`;
@@ -2022,6 +2046,28 @@
       render();
     });
   });
+  for (const [id, query, label, reply] of [
+    ["experimentQueryVin", "vin-list", "VIN \u5217\u8868", "75"],
+    ["experimentQueryNetwork", "network-info", "4G \u4FE1\u606F", "94"]
+  ]) {
+    el(id).addEventListener("click", () => {
+      if (!client?.experimentalIdentityReady || client.experimentalPending || busy) return;
+      if (!window.confirm(`APP \u7684 ${label} \u67E5\u8BE2\u672A\u5728\u65E7\u8BBE\u5907\u9A8C\u8BC1\uFF1B\u8FD4\u56DE\u6570\u636E\u53EF\u80FD\u6D89\u53CA\u9690\u79C1\uFF0C\u672C\u9875\u4E0D\u5C55\u793A\u6216\u4FDD\u5B58\u3002
+\u5C06\u4F7F\u7528\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u4E2D\u7684\u5B57\u6BB5\uFF0C\u53EA\u53D1\u9001\u4E00\u6B21\u5E76\u7B49\u5F85 ${reply} \u56DE\u62A5\uFF1B\u65E0\u56DE\u62A5\u4E0D\u4EE3\u8868\u65E7\u56FA\u4EF6\u4E0D\u652F\u6301\u3002\u7EE7\u7EED\u5417\uFF1F`)) return;
+      busy = true;
+      experimentQueryResult = `${label}\u67E5\u8BE2\u5DF2\u8BF7\u6C42\uFF0C\u7B49\u5F85\u8BBE\u5907 ${reply} \u56DE\u62A5\u2026`;
+      render();
+      void client.experimentalQuery(query).then((result) => {
+        experimentQueryResult = query === "vin-list" ? result === "accepted" ? "\u6536\u5230\u8BBE\u5907 75/01 \u56DE\u62A5\uFF1BVIN \u5185\u5BB9\u672A\u5C55\u793A\u3002" : "\u6536\u5230\u8BBE\u5907 75 \u56DE\u62A5\uFF0C\u4F46\u7ED3\u679C\u7801\u4E0D\u662F 01\uFF1BVIN \u5185\u5BB9\u672A\u5C55\u793A\u3002" : "\u6536\u5230\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 94 \u56DE\u62A5\uFF1B\u4E0D\u5C55\u793A 4G \u5185\u5BB9\uFF0C\u672A\u5224\u65AD\u914D\u7F6E\u72B6\u6001\u3002";
+      }, (error) => {
+        experimentQueryResult = `${label}\u67E5\u8BE2\u672A\u786E\u8BA4\uFF1A${errorMessage(error)}`;
+        failure(`${label}\u67E5\u8BE2`, error);
+      }).finally(() => {
+        busy = false;
+        render();
+      });
+    });
+  }
   async function control(action) {
     if (!client) return;
     const name = { start: "\u5F00\u59CB\u5145\u7535", stop: "\u505C\u6B62\u5145\u7535", unlock: "\u89E3\u9664\u7535\u5B50\u9501" }[action];
@@ -2222,7 +2268,7 @@ ${faultAdvice(status2)}
     render();
   });
   el("liveForgetDevice").addEventListener("click", () => {
-    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u8BB0\u5F55\u3001\u9A8C\u8BC1\u7801\u53CA\u5168\u90E8\u672C\u5730\u5145\u7535/\u9884\u7EA6\u5386\u53F2\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
+    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u8BB0\u5F55\u3001\u9A8C\u8BC1\u7801\u53CA\u5168\u90E8\u672C\u5730\u9884\u7EA6\u8BB0\u5F55\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
     client?.forgetDevice();
     history.clear();
     statusAt = 0;
@@ -2231,7 +2277,7 @@ ${faultAdvice(status2)}
     render();
   });
   el("localHistoryClear").addEventListener("click", () => {
-    if (!window.confirm("\u786E\u5B9A\u5220\u9664\u6B64\u6D4F\u89C8\u5668\u4E2D\u6240\u6709\u8BBE\u5907\u7684\u672C\u7F51\u9875\u5145\u7535\u53CA\u9884\u7EA6\u8BB0\u5F55\uFF1F\u65E0\u6CD5\u6062\u590D\u3002")) return;
+    if (!window.confirm("\u786E\u5B9A\u5220\u9664\u6B64\u6D4F\u89C8\u5668\u4E2D\u6240\u6709\u8BBE\u5907\u7684\u672C\u7F51\u9875\u9884\u7EA6\u8BB0\u5F55\uFF1F\u65E0\u6CD5\u6062\u590D\u3002")) return;
     history.clear();
     confirmedReservation = null;
     render();
@@ -2301,8 +2347,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "8f66f22",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T18:10:52.252Z")
+    buildRevision: "72d07da",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T18:55:00.692Z")
   });
   refreshDiagnostics(true);
   render();
@@ -2319,8 +2365,6 @@ ${faultAdvice(status2)}
     updateReservationCountdown();
   });
   window.addEventListener("pagehide", (event) => {
-    el("experimentPile").value = "";
-    el("experimentGun").value = "";
     experimentReport = null;
     diagnostics.add("page-hide", {
       persisted: event.persisted,
@@ -2339,13 +2383,4 @@ ${faultAdvice(status2)}
     refreshDiagnostics();
     render();
   });
-  if (client?.rememberedName && window.isSecureContext) {
-    diagnostics.add("restore-auto-start", { remembered: true });
-    refreshDiagnostics();
-    record("\u5C1D\u8BD5\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\u2026");
-    void reconnectLast("auto");
-  } else {
-    diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
-    refreshDiagnostics();
-  }
 })();

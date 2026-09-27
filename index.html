@@ -52,7 +52,7 @@
         <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
         <p class="footer">自动识别依赖设备通知；若没有通知，可手动选择。无法确认协议时不会发送密码。</p>
         <div class="actions"><button id="liveRestore" class="primary" type="button" disabled>一键连接上次设备</button><button id="liveChoose" class="secondary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
-        <small>协议：<span id="liveProtocolName">等待识别</span>。本页断线后可直接重连；重新打开页面后须由 Bluefy 的 getDevices() 返回已授权设备，否则浏览器规定必须重新选择授权。</small>
+        <small>协议：<span id="liveProtocolName">等待识别</span>。打开或刷新页面不会自动连接。点击「一键连接上次设备」才尝试恢复；若 Bluefy 的 getDevices() 未返回授权设备，须重新选择。</small>
       </div>
       <div class="notice light" id="liveLoginProgress" role="status" aria-live="polite" style="margin-bottom:16px" hidden>正在授权…</div>
       <div class="panel" id="liveAuthBox" hidden><h2>设备蓝牙验证码</h2><label for="livePassword">五位验证码</label><input id="livePassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="仅发送给所选 BLE 设备">
@@ -91,21 +91,22 @@
         <div class="actions"><button class="primary" id="reserveSubmit" type="button" disabled>提交预约</button><button class="danger" id="reserveCancel" type="button" disabled>取消预约</button></div>
         <p class="footer">需在未来 24 小时内预约。提交条件按原小程序：插枪、未在充电中、未启用即插即充或无感充电、设备处于充电准备状态；不额外要求电子锁状态。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。仅设备确认后视为提交成功；网页不会在后台定时发送开始指令。</p>
       </div>
-      <div class="notice">尚未与真实充电桩及 Bluefy 联调。首次预约请在设备旁核对设备回执、预约开始时间和结束方式；收到提交回执不等于预约已按时执行。</div>
-      <div class="panel"><h2>本网页充电记录</h2><p class="sub">只记录此网页观察到的设备状态；不是设备订单，无法读取微信小程序里的历史。离线期间无法确定准确起止时间。</p><div id="localChargeHistory" aria-live="off">暂无本网页记录</div></div>
-      <div class="panel"><h2>本网页预约记录</h2><p class="sub">仅保存设备已确认的本网页预约操作；其他客户端修改、设备离线执行结果无法从本地记录推定。</p><div id="localReserveHistory" aria-live="off">暂无本网页记录</div><p class="footer" id="localHistoryHint">仅存储在此浏览器的网站数据中。</p><button id="localHistoryClear" class="secondary full" type="button">清除此网页的充电和预约记录</button></div>
+      <div class="panel"><h2>本网页预约记录</h2><p class="sub">仅保存设备已确认的本网页预约操作；其他客户端修改、设备离线执行结果无法从本地记录推定。</p><div id="localReserveHistory" aria-live="off">暂无本网页记录</div><p class="footer" id="localHistoryHint">仅存储在此浏览器的网站数据中。</p><button id="localHistoryClear" class="secondary full" type="button">清除此网页的预约记录</button></div>
       </section>
       <section id="tabPanelExperiment" role="tabpanel" aria-labelledby="tabExperiment" style="margin-top:16px" hidden>
-        <div class="notice">实验功能，未经旧设备验证。APP 显示过 22／7／11／16 kW，但无法确定它们分别对应档位 0～3；不要按 kW 选档。仅连接、蓝牙授权和近期状态均具备时允许手动操作。</div>
+        <div class="notice">APP 二进制实验命令未经旧设备验证，查询名称不能证明对旧固件无副作用。仅在当前连接已授权、且近期收到校验有效的 54 状态时，才允许手动发送；不会自动或定时试发。APP 显示过 22／7／11／16 kW，档位对应顺序未知。</div>
         <div class="panel" style="margin-top:16px"><h2>被动功率与档位状态</h2><p class="sub">只接收 APP 使用的 0x23／54 二进制状态通知；不会发送“查询充电模式”或定时查询指令。若设备只发文本状态，这里会一直显示未知；未收到 54 不能证明旧固件不支持。</p>
           <div class="experiment-values"><div class="metric"><strong id="experimentReportedGear">--</strong><span>设备上报档位（0～3；kW 对应未知）</span></div><div class="metric"><strong id="experimentReportedPower">--</strong><span>设备上报充电功率（APP 原值÷10；单位未核实）</span></div></div>
           <p class="sub" id="experimentReportAge" role="status" aria-live="polite">尚未收到有效的二进制 54 通知。</p>
         </div>
-        <div class="panel"><h2>手动实验：功率档位</h2><p class="sub">APP 的 BLE 帧为 23 0B 32 [四字节桩编码] [一字节枪号] [档位序号] 66 [校验]。桩编码和枪号须从同一设备的可信报文取得；不等于 Web Bluetooth 设备 ID。不保存输入，也不写入诊断日志。</p>
-          <label for="experimentPile">桩编码（8 位十六进制；不保存）</label><input id="experimentPile" type="text" maxlength="8" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="从同一设备的 APP 实包取得">
-          <label for="experimentGun">枪号（2 位十六进制；不保存）</label><input id="experimentGun" type="text" maxlength="2" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="从同一设备的 APP 实包取得">
+        <div class="panel"><h2>当前设备字段</h2><p class="sub" id="experimentIdentityStatus" role="status" aria-live="polite">等待当前设备有效的 54 通知；不要求手动输入桩编码或枪号。</p><p class="footer">只在内存中用于当前连接，不展示设备标识，不保存或写入诊断日志。没有有效 54 时禁止发送；收到 54 不代表旧固件支持以下命令。</p></div>
+        <div class="panel"><h2>APP 独有手动查询</h2><p class="sub">VIN 列表：23 0A 25 [桩编码4字节] [枪号1字节] 66 [校验] → 75（字节 8 为结果码）。4G 信息：23 0A 44 [桩编码4字节] [枪号1字节] 66 [校验] → 94。桩编码与枪号自动从同一设备的有效 54 通知取得。</p>
+          <div class="actions"><button id="experimentQueryVin" class="secondary" type="button" disabled>查询 VIN 列表</button><button id="experimentQueryNetwork" class="secondary" type="button" disabled>查询 4G 信息</button></div>
+          <p id="experimentQueryResult" class="sub" role="status" aria-live="polite">尚未发起 APP 查询。</p><p class="footer">两条查询各需点击并确认；只展示是否收到对应的校验有效回报，不显示或保存 VIN、运营商及网络信息。BLE 写入完成 ≠ 设备回报；无回报不能证明不支持。查询可能仍有旧固件未验证的副作用。</p>
+        </div>
+        <div class="panel"><h2>手动实验：功率档位</h2><p class="sub">APP 的 BLE 帧为 23 0B 32 [设备字段自动获取] [档位序号] 66 [校验]。仅在当前设备收到近期有效 54 且常规状态也新鲜时才能手动试验；kW 与档位的对应顺序未知。</p>
           <label for="experimentGear">档位序号（不代表固定 kW）</label><select id="experimentGear"><option value="0">档位 0</option><option value="1">档位 1</option><option value="2">档位 2</option><option value="3">档位 3</option></select>
-          <button id="experimentSend" class="danger full" type="button" disabled>核对报文并手动试验</button>
+          <button id="experimentSend" class="danger full" type="button" disabled>确认后手动试验</button>
           <p id="experimentResult" class="sub" role="status" aria-live="polite">尚未执行实验操作。</p><p class="footer">写入成功 ≠ 设备接受；82/01 回执 ≠ 档位已变化。仅 82/01 与后续 54 档位一致时显示“双重确认”，实际输出功率仍须在设备旁核对。超时不自动重试。</p>
         </div>
       </section>
@@ -118,17 +119,17 @@
       </div>
       </section>
       <section id="tabPanelAbout" role="tabpanel" aria-labelledby="tabAbout" style="margin-top:16px" hidden>
-        <div class="panel"><h2>WattSaving · 充电桩控制</h2><p class="sub">个人用网页 · 非官方产品</p><p class="sub">真机控制 · 尚待实机验证</p><p class="footer build-info" id="buildInfo">版本信息未载入</p></div>
+        <div class="panel"><h2>WattSaving · 充电桩控制</h2><p class="footer build-info" id="buildInfo">版本信息未载入</p></div>
       </section>
     </div>
     <div class="tabs" id="liveTabs" role="tablist" aria-label="充电桩功能">
       <button class="tab" id="tabConnection" role="tab" aria-controls="tabPanelConnection" aria-selected="true" tabindex="0" type="button"><span class="connection-dot" id="livePhase" role="img" aria-label="未连接" title="未连接"></span>连接</button>
       <button class="tab" id="tabCharge" role="tab" aria-controls="tabPanelCharge" aria-selected="false" tabindex="-1" type="button">充电</button>
-      <button class="tab" id="tabExperiment" role="tab" aria-label="实验性功率档位" aria-controls="tabPanelExperiment" aria-selected="false" tabindex="-1" type="button">实验</button>
+      <button class="tab" id="tabExperiment" role="tab" aria-label="APP 实验查询与档位" aria-controls="tabPanelExperiment" aria-selected="false" tabindex="-1" type="button">实验</button>
       <button class="tab" id="tabFeedback" role="tab" aria-label="反馈与诊断" aria-controls="tabPanelFeedback" aria-selected="false" tabindex="-1" type="button">反馈</button>
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=experimental-gear-v1"></script>
+  <script defer src="./app.js?v=experimental-queries-v2"></script>
 </body>
 </html>

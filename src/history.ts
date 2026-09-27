@@ -2,16 +2,6 @@ import type { DeviceStatus, ReservationEnd } from "./protocol";
 
 const KEY = "wattsaving-local-history-v1";
 const LIMIT = 100;
-export interface ChargeRecord {
-  id: string;
-  deviceId: string;
-  startedAt: number | null;
-  firstSeenAt: number;
-  endedAt: number | null;
-  state: "charging" | "ended";
-  energyKWh: number | null;
-  minutes: number | null;
-}
 export interface ReserveRecord {
   id: string;
   deviceId: string;
@@ -21,8 +11,8 @@ export interface ReserveRecord {
   state: "accepted" | "observed" | "charging" | "ended" | "cancelled" | "replaced";
   updatedAt: number;
 }
-interface HistoryData { charges: ChargeRecord[]; reservations: ReserveRecord[]; }
-const empty = (): HistoryData => ({ charges: [], reservations: [] });
+interface HistoryData { reservations: ReserveRecord[]; }
+const empty = (): HistoryData => ({ reservations: [] });
 const finiteTime = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 const deviceRecord = (v: unknown): v is { id: string; deviceId: string } =>
   !!v && typeof v === "object" && typeof (v as { id?: unknown }).id === "string" &&
@@ -33,27 +23,30 @@ export class LocalHistory {
   readonly available: boolean;
   constructor(private readonly storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">) {
     let available = !!storage;
+    let needsMigration = false;
     try {
       const raw = storage?.getItem(KEY);
       if (raw) {
         const parsed: unknown = JSON.parse(raw);
         if (parsed && typeof parsed === "object") {
           const obj = parsed as Partial<HistoryData>;
-          this.data.charges = Array.isArray(obj.charges) ? obj.charges.filter(deviceRecord).slice(0, LIMIT) as ChargeRecord[] : [];
           this.data.reservations = Array.isArray(obj.reservations) ? obj.reservations.filter(deviceRecord).slice(0, LIMIT) as ReserveRecord[] : [];
+          // 旧版浏览器数据中的本地充电记录不来自充电桩历史；迁移时直接删除，预约记录保留。
+          needsMigration = "charges" in obj;
         }
       }
     } catch { available = false; this.data = empty(); }
+    if (needsMigration) {
+      try { storage?.setItem(KEY, JSON.stringify(this.data)); } catch { available = false; /* 仍保留本页的预约数据 */ }
+    }
     this.available = available;
   }
   private save(): void {
     try { this.storage?.setItem(KEY, JSON.stringify(this.data)); } catch { /* 私密模式：仅保留本次页面的记录 */ }
   }
-  charges(deviceId: string): ChargeRecord[] { return this.data.charges.filter(r => r.deviceId === deviceId); }
   reservations(deviceId: string): ReserveRecord[] { return this.data.reservations.filter(r => r.deviceId === deviceId); }
   latestDeviceId(): string | null {
-    const charge = this.data.charges[0], reservation = this.data.reservations[0];
-    return !charge ? reservation?.deviceId || null : !reservation || charge.firstSeenAt >= reservation.submittedAt ? charge.deviceId : reservation.deviceId;
+    return this.data.reservations[0]?.deviceId || null;
   }
   latestReservation(deviceId: string): ReserveRecord | undefined {
     return this.reservations(deviceId).find(r => ["accepted", "observed", "charging"].includes(r.state) && finiteTime(r.startsAt));
@@ -62,27 +55,6 @@ export class LocalHistory {
     const previous = this.lastLive.get(deviceId);
     this.lastLive.set(deviceId, status.state);
     let changed = false;
-    const active = this.data.charges.find(r => r.deviceId === deviceId && r.state === "charging");
-    if (status.state === "4") {
-      if (!active) {
-        this.data.charges.unshift({ id: String(now), deviceId, startedAt: previous === "2" ? now : null,
-          firstSeenAt: now, endedAt: null, state: "charging", energyKWh: Number.isFinite(status.energyKWh) ? status.energyKWh : null,
-          minutes: Number.isFinite(status.minutes) ? status.minutes : null });
-        this.data.charges = this.data.charges.slice(0, LIMIT);
-        changed = true;
-      } else if (active.energyKWh !== status.energyKWh || active.minutes !== status.minutes) {
-        active.energyKWh = Number.isFinite(status.energyKWh) ? status.energyKWh : active.energyKWh;
-        active.minutes = Number.isFinite(status.minutes) ? status.minutes : active.minutes;
-        changed = true;
-      }
-    } else if (active) {
-      active.state = "ended";
-      // 只有本次页面确实观察到充电中 -> 非充电中，才记录结束观察时间。
-      active.endedAt = previous === "4" ? now : null;
-      active.energyKWh = Number.isFinite(status.energyKWh) ? status.energyKWh : active.energyKWh;
-      active.minutes = Number.isFinite(status.minutes) ? status.minutes : active.minutes;
-      changed = true;
-    }
     const reservation = this.latestReservation(deviceId);
     if (reservation) {
       let state: ReserveRecord["state"] = reservation.state;

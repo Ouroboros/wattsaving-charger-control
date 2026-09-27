@@ -28,7 +28,10 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   const experiment = html.slice(html.indexOf('<section id="tabPanelExperiment"'), html.indexOf('<section id="tabPanelFeedback"'));
   assert.match(experiment, /id="experimentSend"/);
   assert.match(experiment, /只接收 APP 使用的 0x23／54/);
-  assert.doesNotMatch(experiment, /id="experimentQuery"|id="experimentAutoQuery"/);
+  assert.match(experiment, /id="experimentQueryVin"/);
+  assert.match(experiment, /id="experimentQueryNetwork"/);
+  assert.doesNotMatch(experiment, /id="experimentPile"|id="experimentGun"|id="experimentAutoQuery"/);
+  assert.doesNotMatch(charge, /id="localChargeHistory"|本网页充电记录|尚未与真实充电桩及 Bluefy 联调/);
   assert.match(connection, /id="liveChoose"/);
   assert.match(connection, /id="liveForgetDevice"/);
   assert.doesNotMatch(connection, /id="liveStart"|id="reserveSubmit"/);
@@ -38,8 +41,17 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   const about = html.slice(html.indexOf('<section id="tabPanelAbout"'));
   assert.match(about, /WattSaving · 充电桩控制/);
   assert.match(about, /id="buildInfo"/);
+  assert.doesNotMatch(about, /个人用网页 · 非官方产品|真机控制 · 尚待实机验证/);
   assert.match(html, /id="liveLog" role="log" aria-live="off"/);
   assert.match(html, /\.log \{[^}]*max-height:240px; overflow-y:auto;/);
+});
+
+test("刷新页面不会自动连接，只允许点击按钮恢复上次设备", () => {
+  const source = readFileSync("src/main.ts", "utf8");
+  const html = readFileSync("index.html", "utf8");
+  assert.doesNotMatch(source, /restore-auto-start|reconnectLast\("auto"\)/);
+  assert.match(source, /el\("liveRestore"\)\.addEventListener\("click", \(\) => \{ void reconnectLast\(\); \}\)/);
+  assert.match(html, /打开或刷新页面不会自动连接/);
 });
 
 test("清空诊断的点击事件没有二次确认，错误处理调用弹框", () => {

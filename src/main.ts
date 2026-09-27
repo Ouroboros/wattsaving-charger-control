@@ -2,7 +2,7 @@ import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEve
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
 import { LocalHistory } from "./history";
-import { experimentalGearCommand } from "./experimental";
+import type { ExperimentalQuery } from "./experimental";
 import { showTab, tabIndexForKey } from "./tabs";
 
 declare const __BUILD_VERSION__: string;
@@ -35,6 +35,7 @@ let staleLoggedFor = 0;
 let reservationResult = "";
 let adminMessage = "";
 let experimentResult = "";
+let experimentQueryResult = "";
 let experimentReport: { deviceId: string; gear: number; powerTenths: number; at: number } | null = null;
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
@@ -52,7 +53,6 @@ function formatHistoryTime(value: number | null): string {
 }
 function renderHistory(): void {
   const id = client?.currentDevice?.id || history.latestDeviceId();
-  const charges = id ? history.charges(id) : [];
   const reservations = id ? history.reservations(id) : [];
   const show = (boxId: string, entries: string[]): void => {
     const box = el(boxId);
@@ -62,10 +62,6 @@ function renderHistory(): void {
     for (const entry of entries) { const item = document.createElement("li"); item.textContent = entry; list.append(item); }
     box.append(list);
   };
-  show("localChargeHistory", charges.map(r =>
-    `首次观察到充电：${formatHistoryTime(r.firstSeenAt)}${r.startedAt ? "（观察到准备→充电）" : "（准确开始时间未知）"}\n` +
-    `停止观察：${r.state === "charging" ? "上次观察到充电中，当前需核对" : r.endedAt ? formatHistoryTime(r.endedAt) : "离线期间发生，准确时间未知"}\n` +
-    `已充时长：${r.minutes !== null && Number.isFinite(r.minutes) ? duration(r.minutes) : "未知"} · 电量：${r.energyKWh !== null && Number.isFinite(r.energyKWh) ? `${r.energyKWh.toFixed(1)} kWh` : "未知"}`));
   const names: Record<string, string> = { accepted: "设备已接受，待核对模式", observed: "曾观察到预约模式", charging: "后续观察到充电中", ended: "后续观察到停止充电", cancelled: "设备已确认取消", replaced: "被本网页新预约替换" };
   show("localReserveHistory", reservations.map(r =>
     `提交：${formatHistoryTime(r.submittedAt)} · 预约：${formatHistoryTime(r.startsAt)}\n` +
@@ -181,9 +177,7 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "phase") {
     phase = event.phase;
     if (phase === "offline" || phase === "connecting") {
-      reservationResult = ""; adminMessage = ""; experimentResult = ""; experimentReport = null;
-      el<HTMLInputElement>("experimentPile").value = "";
-      el<HTMLInputElement>("experimentGun").value = "";
+      reservationResult = ""; adminMessage = ""; experimentResult = ""; experimentQueryResult = ""; experimentReport = null;
     }
     diagnostics.add("phase", { phase }); record(event.message);
   }
@@ -258,10 +252,13 @@ function render(): void {
   text("experimentReportAge", !report ? "尚未收到有效的二进制 54 通知。" : reportFresh ?
     `收到设备 54 通知（${new Date(report.at).toLocaleTimeString("zh-CN")}）；仅为被动读取。` : "上次 54 通知已过期；当前功率和档位未知。");
   text("experimentResult", experimentResult || "尚未执行实验操作。");
-  const pile = el<HTMLInputElement>("experimentPile").value;
-  const gun = el<HTMLInputElement>("experimentGun").value;
-  el<HTMLButtonElement>("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending ||
-    !/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun);
+  text("experimentQueryResult", experimentQueryResult || "尚未发起 APP 查询。");
+  text("experimentIdentityStatus", client?.experimentalIdentityReady ?
+    "已从当前设备校验有效的 54 通知取得桩编码与枪号；不展示、不保存。" :
+    "尚无当前设备近期有效的 54 通知；不可猜测桩编码或枪号，实验操作暂不可用。");
+  el<HTMLButtonElement>("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending || !client.experimentalIdentityReady;
+  for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
+    el<HTMLButtonElement>(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
   const loginProgress = el("liveLoginProgress");
   loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
   if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "正在自动登录，等待设备确认…" : "正在验证验证码，等待设备确认…");
@@ -316,23 +313,23 @@ el("liveChoose").addEventListener("click", () => {
   // 设备选择器必须从点击事件直接调用。
   void client.chooseDevice(selectedProtocol()).catch(error => failure("选择/连接", error));
 });
-async function reconnectLast(source: "button" | "auto"): Promise<void> {
+async function reconnectLast(): Promise<void> {
   if (!client || busy) return;
-  diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
+  diagnostics.add("restore-request", { source: "button", remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
   busy = true; render();
   const dialogsBefore = errorDialogs;
   try {
     const found = await client.restore();
-    diagnostics.add("restore-finish", { source, discovered: found });
+    diagnostics.add("restore-finish", { source: "button", discovered: found });
     if (!found && errorDialogs === dialogsBefore) {
       const explanation = "Bluefy 未返回上次设备的浏览器授权；网页不能仅凭名称或 ID 连接，请用「选择 / 更换设备」重新授权。";
       record(explanation);
-      if (source === "button") showErrorModal(explanation);
+      showErrorModal(explanation);
     }
   } catch (error) { failure("恢复设备", error); }
   finally { busy = false; render(); }
 }
-el("liveRestore").addEventListener("click", () => { void reconnectLast("button"); });
+el("liveRestore").addEventListener("click", () => { void reconnectLast(); });
 el("liveProtocol").addEventListener("change", () => {
   const version = selectedProtocol();
   if (!version || !client?.currentDevice || client.authorized) return;
@@ -355,25 +352,35 @@ el("liveRefresh").addEventListener("click", () => {
   }
   void client.refresh().catch(error => failure("同步状态", error));
 });
-for (const id of ["experimentPile", "experimentGun"]) el(id).addEventListener("input", render);
 el("experimentSend").addEventListener("click", () => {
-  if (!client || busy || !client.authorized || !client.currentStatus || Date.now() - statusAt >= 20000) return;
-  const pile = el<HTMLInputElement>("experimentPile").value;
-  const gun = el<HTMLInputElement>("experimentGun").value;
+  if (!client || busy || !client.authorized || !client.experimentalIdentityReady || !client.currentStatus || Date.now() - statusAt >= 20000) return;
   const gear = Number(el<HTMLSelectElement>("experimentGear").value);
-  let packet: Uint8Array;
-  try { packet = experimentalGearCommand(pile, gun, gear); }
-  catch (error) { reportOperationError(errorMessage(error)); return; }
-  const hex = [...packet].map(byte => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
-  if (!window.confirm(`实验命令，旧设备未验证。档位 ${gear} 与 22／7／11／16 kW 的对应关系未知。\n请确认桩编码和枪号属于当前设备，且当前可现场核对。\n将发送原始字节：${hex}\n仅 82/01 加 54 状态匹配才显示双重确认；无自动重试。继续吗？`)) return;
+  if (!window.confirm(`实验命令，旧设备未验证。档位 ${gear} 与 22／7／11／16 kW 的对应关系未知。\n设备字段仅从当前连接的有效 54 通知自动取得，不展示原始报文。\n仅 82/01 加 54 状态匹配才显示双重确认；无自动重试。继续吗？`)) return;
   busy = true; experimentResult = `已请求档位 ${gear}，等待设备 82 回执及 54 状态…`; render();
-  void client.experimentalGear(pile, gun, gear).then(() => {
+  void client.experimentalGear(gear).then(() => {
     experimentResult = `设备 82/01 已接受、54 已报告档位 ${gear}；实际输出功率须现场核对。`;
   }, error => {
     experimentResult = `档位 ${gear} 未得到双重确认：${errorMessage(error)}`;
     failure("实验档位", error);
   }).finally(() => { busy = false; render(); });
 });
+for (const [id, query, label, reply] of [
+  ["experimentQueryVin", "vin-list", "VIN 列表", "75"],
+  ["experimentQueryNetwork", "network-info", "4G 信息", "94"]
+] as const satisfies readonly (readonly [string, ExperimentalQuery, string, string])[]) {
+  el(id).addEventListener("click", () => {
+    if (!client?.experimentalIdentityReady || client.experimentalPending || busy) return;
+    if (!window.confirm(`APP 的 ${label} 查询未在旧设备验证；返回数据可能涉及隐私，本页不展示或保存。\n将使用当前设备 54 通知中的字段，只发送一次并等待 ${reply} 回报；无回报不代表旧固件不支持。继续吗？`)) return;
+    busy = true; experimentQueryResult = `${label}查询已请求，等待设备 ${reply} 回报…`; render();
+    void client.experimentalQuery(query).then(result => {
+      experimentQueryResult = query === "vin-list" ? result === "accepted" ? "收到设备 75/01 回报；VIN 内容未展示。" :
+        "收到设备 75 回报，但结果码不是 01；VIN 内容未展示。" : "收到设备校验有效的 94 回报；不展示 4G 内容，未判断配置状态。";
+    }, error => {
+      experimentQueryResult = `${label}查询未确认：${errorMessage(error)}`;
+      failure(`${label}查询`, error);
+    }).finally(() => { busy = false; render(); });
+  });
+}
 async function control(action: ControlAction): Promise<void> {
   if (!client) return;
   const name = { start: "开始充电", stop: "停止充电", unlock: "解除电子锁" }[action];
@@ -499,11 +506,11 @@ el("liveForgetPassword").addEventListener("click", () => {
   client?.forgetPassword(); diagnostics.add("password-forgotten"); record("已删除保存的验证码。"); render();
 });
 el("liveForgetDevice").addEventListener("click", () => {
-  if (!window.confirm("清除本网站保存的设备记录、验证码及全部本地充电/预约历史，并断开连接？")) return;
+  if (!window.confirm("清除本网站保存的设备记录、验证码及全部本地预约记录，并断开连接？")) return;
   client?.forgetDevice(); history.clear(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
 });
 el("localHistoryClear").addEventListener("click", () => {
-  if (!window.confirm("确定删除此浏览器中所有设备的本网页充电及预约记录？无法恢复。")) return;
+  if (!window.confirm("确定删除此浏览器中所有设备的本网页预约记录？无法恢复。")) return;
   history.clear(); confirmedReservation = null; render();
 });
 el("copyDiagnostics").addEventListener("click", async () => {
@@ -570,8 +577,6 @@ document.addEventListener("visibilitychange", () => {
   refreshDiagnostics(); updateReservationCountdown();
 });
 window.addEventListener("pagehide", event => {
-  el<HTMLInputElement>("experimentPile").value = "";
-  el<HTMLInputElement>("experimentGun").value = "";
   experimentReport = null;
   diagnostics.add("page-hide", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
@@ -581,11 +586,4 @@ window.addEventListener("pageshow", event => {
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
   refreshDiagnostics(); render();
 });
-if (client?.rememberedName && window.isSecureContext) {
-  diagnostics.add("restore-auto-start", { remembered: true }); refreshDiagnostics();
-  record("尝试恢复上次设备的浏览器授权…");
-  void reconnectLast("auto");
-} else {
-  diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
-  refreshDiagnostics();
-}
+// 页面加载与刷新只渲染离线状态；恢复连接必须由用户点击「一键连接上次设备」。

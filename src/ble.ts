@@ -1,6 +1,6 @@
 import { adminCommand, command, FrameDecoder, reservationCommand, syncClock, type AdminAction, type ControlAction, type DeviceStatus, type Frame, type Reservation, type ReservationAction, type Version } from "./protocol";
 import { diagnosticError, type DiagnosticLevel, type DiagnosticValue } from "./diagnostics";
-import { ExperimentalDecoder, experimentalGearCommand, type ExperimentalFrame } from "./experimental";
+import { ExperimentalDecoder, experimentalGearCommand, experimentalQueryCommand, type ExperimentalFrame, type ExperimentalQuery } from "./experimental";
 
 // Web Bluetooth 在部分 TypeScript DOM 版本中没有类型定义；只声明本项目使用到的 API。
 export interface BleCharacteristic extends EventTarget {
@@ -140,7 +140,9 @@ export class ChargerClient {
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingReservation: { action: ReservationAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingAdmin: { action: AdminAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
-  private pendingGear: { gear: number; ack: boolean; observed: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingGear: { gear: number; pile: string; gun: string; ack: boolean; observed: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingQuery: { query: ExperimentalQuery; resolve: (result: "accepted" | "rejected" | "received") => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private binaryIdentity: { pile: string; gun: string; at: number; epoch: number } | null = null;
   private adminVerified = false;
   private reservationAccepted: boolean | null = null;
   private fallbackVault: Vault = { lastId: "", devices: {} };
@@ -158,7 +160,16 @@ export class ChargerClient {
   get automaticLoginPending(): boolean { return this.autoLoginInProgress && this.phase === "authenticating"; }
   get reservationPending(): boolean { return !!this.pendingReservation; }
   get adminPending(): boolean { return !!this.pendingAdmin; }
-  get experimentalPending(): boolean { return !!this.pendingGear; }
+  get experimentalPending(): boolean { return !!(this.pendingGear || this.pendingQuery); }
+  get experimentalIdentityReady(): boolean {
+    if (!this.authorized || !this.binaryIdentity || this.binaryIdentity.epoch !== this.epoch) return false;
+    const age = Date.now() - this.binaryIdentity.at;
+    return age >= 0 && age < 20000;
+  }
+  private experimentalIdentity(): { pile: string; gun: string } {
+    if (!this.experimentalIdentityReady || !this.binaryIdentity) throw new Error("当前设备未提供近期校验有效的 54 状态帧；不能猜测桩编码和枪号");
+    return this.binaryIdentity;
+  }
   get administratorAuthorized(): boolean { return this.authorized && this.adminVerified; }
   get pairingAvailable(): boolean { return this.protocol === 2 && !!this.pairingNotifier; }
   get manualBluetoothLogin(): boolean { try { return localStorage.getItem(AUTH_MODE_KEY) === "1"; } catch { return false; } }
@@ -494,22 +505,43 @@ export class ChargerClient {
   }
   async refresh(): Promise<void> {
     if (!this.authorized || !this.protocol) throw new Error("请先通过设备授权");
-    if (this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("正在等待设备操作回执，请勿同时发送同步指令");
+    if (this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("正在等待设备操作回执，请勿同时发送同步指令");
     // 旧应用使用同步设备时钟的帧触发状态更新；它不是无副作用的读取操作。
     await this.write(syncClock(this.protocol), "clock-sync");
     this.emit({ type: "notice", message: "已发送设备时钟同步帧，等待状态通知。" });
   }
-  experimentalGear(pile: string, gun: string, gear: number): Promise<void> {
+  experimentalGear(gear: number): Promise<void> {
     if (!this.authorized || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("须先取得近期设备授权状态；不能凭旧状态尝试档位");
-    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条设备操作尚未确认");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("上一条设备操作尚未确认");
+    const { pile, gun } = this.experimentalIdentity();
     const bytes = experimentalGearCommand(pile, gun, gear);
     this.diagnose("experimental-gear-request", { gear, bytes: bytes.length }); // 不记录桩编码、枪号或报文原文。
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.rejectExperimental(new Error("未同时收到 82/01 回执和 54 档位状态；结果未知，请现场核对，勿直接重试"), "timeout"), 12000);
-      this.pendingGear = { gear, ack: false, observed: false, resolve, reject, timer };
+      this.pendingGear = { gear, pile, gun, ack: false, observed: false, resolve, reject, timer };
       void this.writeBytes(bytes, "experimental-gear").catch(error =>
         this.rejectExperimental(new Error(`发送实验性档位报文失败：${message(error)}`), "write-error"));
     });
+  }
+  experimentalQuery(query: ExperimentalQuery): Promise<"accepted" | "rejected" | "received"> {
+    if (!this.authorized) throw new Error("须先取得设备蓝牙授权");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("上一条设备操作尚未确认");
+    const { pile, gun } = this.experimentalIdentity();
+    const bytes = experimentalQueryCommand(pile, gun, query);
+    this.diagnose("experimental-query-request", { query, bytes: bytes.length }); // 只记录类别，不记录 VIN、网络资料或设备字段。
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.rejectQuery(new Error("未收到对应设备回报；不能据此判断旧固件不支持，请勿直接重试"), "timeout"), 10000);
+      this.pendingQuery = { query, resolve, reject, timer };
+      void this.writeBytes(bytes, `experimental-query-${query}`).catch(error =>
+        this.rejectQuery(new Error(`发送 APP 查询报文失败：${message(error)}`), "write-error"));
+    });
+  }
+  private rejectQuery(error: Error, reason: string): void {
+    const pending = this.pendingQuery;
+    if (!pending) return;
+    this.pendingQuery = null; clearTimeout(pending.timer);
+    this.diagnose("experimental-query-unconfirmed", { query: pending.query, reason }, "warn");
+    pending.reject(error);
   }
   private rejectExperimental(error: Error, reason: string): void {
     const pending = this.pendingGear;
@@ -527,7 +559,7 @@ export class ChargerClient {
   }
   control(action: ControlAction): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("上一条指令尚未确认");
     const s = this.latest;
     if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("设备当前不满足启动条件：需就绪、插枪、无预约或即插即充冲突");
     if (action === "stop" && s.state !== "4") throw new Error("只有充电中才能停止");
@@ -543,7 +575,7 @@ export class ChargerClient {
   admin(action: AdminAction, password?: string): Promise<void> {
     if (!this.authorized || !this.protocol || !this.device) throw new Error("请先连接并通过设备蓝牙授权");
     if (action !== "admin-auth" && !this.adminVerified) throw new Error("请先使用独立管理员验证码取得设备确认");
-    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条设备操作尚未确认");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("上一条设备操作尚未确认");
     if (action !== "admin-auth" && (!this.latest || Date.now() - this.latestAt > 20000)) throw new Error("设备状态已过期；管理操作需要最新设备状态");
     const status = this.latest;
     if (action === "plug-on" && (status?.mode === "3" || status?.mode === "5")) throw new Error("请先取消预约或无感充电模式");
@@ -568,7 +600,7 @@ export class ChargerClient {
   cancelReservation(): Promise<void> { return this.reserve("cancel"); }
   private reserve(action: ReservationAction, reservation?: Reservation): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin || this.pendingGear) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin || this.experimentalPending) throw new Error("上一条指令尚未确认");
     const status = this.latest;
     if (action === "submit") {
       const blocked = reservationBlockReason(status);
@@ -623,9 +655,23 @@ export class ChargerClient {
   private onExperimentalFrame(frame: ExperimentalFrame): void {
     if (!this.authorized) { this.diagnose("experimental-reply-ignored", { reason: "not-authorized" }); return; }
     if (frame.type === "power-report") {
+      this.binaryIdentity = { pile: frame.pile, gun: frame.gun, at: Date.now(), epoch: this.epoch };
       this.emit({ type: "experimental-power", gear: frame.gear, powerTenths: frame.powerTenths });
       const pending = this.pendingGear;
-      if (pending && frame.gear === pending.gear) { pending.observed = true; this.confirmExperimental(); }
+      if (pending && frame.gear === pending.gear && frame.pile === pending.pile && frame.gun === pending.gun) {
+        pending.observed = true; this.confirmExperimental();
+      }
+      return;
+    }
+    if (frame.type === "vin-list-reply" || frame.type === "network-info-reply") {
+      const pending = this.pendingQuery;
+      if (!pending || frame.type !== (pending.query === "vin-list" ? "vin-list-reply" : "network-info-reply")) {
+        this.diagnose("experimental-reply-ignored", { reason: "query-mismatch-or-no-pending" }); return;
+      }
+      this.pendingQuery = null; clearTimeout(pending.timer);
+      const result = frame.type === "vin-list-reply" ? frame.accepted ? "accepted" : "rejected" : "received";
+      this.diagnose("experimental-query-reply", { query: pending.query, result });
+      pending.resolve(result);
       return;
     }
     const pending = this.pendingGear;
@@ -779,6 +825,8 @@ export class ChargerClient {
     this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"), "disconnect");
     this.rejectAdmin(new Error("蓝牙连接已断开；管理操作结果未知"), "disconnect");
     this.rejectExperimental(new Error("蓝牙连接已断开；档位操作结果未知"), "disconnect");
+    this.rejectQuery(new Error("蓝牙连接已断开；查询结果未知"), "disconnect");
+    this.binaryIdentity = null;
     this.adminVerified = false;
     const server = this.server;
     if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page",

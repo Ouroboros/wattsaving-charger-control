@@ -13,18 +13,18 @@ const status = (state: string, mode = "2"): DeviceStatus => ({
   gunFlag: "0", selfStartFlag: "0", vinFlag: "0"
 });
 
-test("充电记录只记录实际观察；离线结束不伪造时间", () => {
+test("旧浏览器本地充电记录迁移时删除，只保留已确认的预约记录", () => {
   const storage = memory();
-  const first = new LocalHistory(storage);
-  first.trackStatus("test-device", status("4"), 1000);
-  assert.equal(first.charges("test-device")[0].startedAt, null);
+  storage.setItem("wattsaving-local-history-v1", JSON.stringify({ charges: [{ id: "old", deviceId: "charge-device" }],
+    reservations: [{ id: "reservation", deviceId: "test-device", submittedAt: 1000, startsAt: 5000000,
+      end: "自动充满", state: "accepted", updatedAt: 1000 }] }));
   const restored = new LocalHistory(storage);
-  restored.trackStatus("test-device", status("2"), 2000);
-  assert.equal(restored.charges("test-device")[0].endedAt, null);
-  restored.trackStatus("another-device", status("2"), 3000);
-  restored.trackStatus("another-device", status("4"), 4000);
-  restored.trackStatus("another-device", status("5"), 5000);
-  assert.equal(restored.charges("another-device")[0].endedAt, 5000);
+  assert.equal(restored.latestDeviceId(), "test-device");
+  assert.equal(restored.reservations("test-device").length, 1);
+  const saved = JSON.parse(storage.getItem("wattsaving-local-history-v1")!);
+  assert.equal("charges" in saved, false);
+  restored.trackStatus("charge-device", status("4"), 2000);
+  assert.equal(storage.getItem("wattsaving-local-history-v1")?.includes("charge-device"), false);
 });
 
 test("仅确认的预约持久化；替换和取消保留真实操作状态", () => {

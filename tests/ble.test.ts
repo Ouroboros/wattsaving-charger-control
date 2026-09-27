@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer, type ChargerEvent } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
-import { experimentalGearCommand } from "../src/experimental";
+import { experimentalGearCommand, experimentalQueryCommand } from "../src/experimental";
 import { nextMidnight } from "../src/protocol";
 
 class MemoryStorage {
@@ -626,12 +626,12 @@ test("重复未识别通知仅保留计数摘要，不冲掉连接与授权诊�
 });
 function binaryReport(gear: number): Uint8Array {
   const result = new Uint8Array(55);
-  result.set([0x23, 55, 0x54]); result[52] = gear; result[53] = 0x66;
+  result.set([0x23, 55, 0x54, 0x11, 0x22, 0x33, 0x44, 0x05]); result[52] = gear; result[53] = 0x66;
   result[54] = result.slice(0, 54).reduce((sum, byte) => sum + byte, 0) & 0xff;
   return result;
 }
 function binaryGearReply(code: number): Uint8Array {
-  const result = Uint8Array.from([0x23, 11, 0x82, 0, 0, 0, 0, 0, code, 0x66, 0]);
+  const result = Uint8Array.from([0x23, 11, 0x82, 0x11, 0x22, 0x33, 0x44, 0x05, code, 0x66, 0]);
   result[10] = result.slice(0, 10).reduce((sum, byte) => sum + byte, 0) & 0xff;
   return result;
 }
@@ -643,11 +643,17 @@ test("实验档位须已授权且状态新鲜；82/01 与后续 54 均出现才�
   const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event), () => true,
     (event, data, level) => log.add(event, data, level));
   await client.chooseDevice(2);
-  assert.throws(() => client.experimentalGear("11223344", "05", 2), /授权状态/);
+  assert.throws(() => client.experimentalGear(2), /授权状态/);
   await client.login("12345", false); await tick();
+  assert.throws(() => client.experimentalGear(2), /54 状态帧/);
+  assert.throws(() => client.experimentalQuery("vin-list"), /54 状态帧/);
+  const corrupt = binaryReport(1); corrupt[54] ^= 1;
+  device.notifier.pushBytes(corrupt);
+  assert.equal(client.experimentalIdentityReady, false);
   device.notifier.pushBytes(binaryReport(1));
+  assert.equal(client.experimentalIdentityReady, true);
   assert.ok(events.some(event => event.type === "experimental-power" && event.gear === 1));
-  const write = client.experimentalGear("11223344", "05", 2);
+  const write = client.experimentalGear(2);
   assert.equal(client.experimentalPending, true);
   assert.equal(device.writer.sent.at(-1), String.fromCharCode(...experimentalGearCommand("11223344", "05", 2)));
   await assert.rejects(client.refresh(), /等待设备操作回执/);
@@ -663,16 +669,53 @@ test("实验档位须已授权且状态新鲜；82/01 与后续 54 均出现才�
   for (const secret of ["11223344", "private-experiment-device", "23 0B 32"]) assert.equal(exported.includes(secret), false);
   client.disconnect();
 });
+test("APP 查询手动发送后仅识别匹配回报，分片敏感内容不展示、不入诊断、不重试", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-query-device");
+  const events: ChargerEvent[] = [];
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event), () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2); await client.login("12345", false); await tick();
+  assert.throws(() => client.experimentalQuery("vin-list"), /54 状态帧/);
+  device.notifier.pushBytes(binaryReport(1));
+  const vin = client.experimentalQuery("vin-list");
+  assert.equal(device.writer.sent.at(-1), String.fromCharCode(...experimentalQueryCommand("11223344", "05", "vin-list")));
+  assert.throws(() => client.experimentalQuery("network-info"), /上一条设备操作/);
+  const list = Uint8Array.from([0x23, 28, 0x75, 0x11, 0x22, 0x33, 0x44, 0x05, 1, ...Array(17).fill(0x56), 0x66, 0]);
+  list[27] = list.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 0xff;
+  device.notifier.pushBytes(list.slice(0, 12)); device.notifier.pushBytes(list.slice(12));
+  assert.equal(await vin, "accepted");
+  const network = client.experimentalQuery("network-info");
+  assert.equal(device.writer.sent.at(-1), String.fromCharCode(...experimentalQueryCommand("11223344", "05", "network-info")));
+  device.notifier.pushBytes(list); // 非当前查询的 75 不可误认 94。
+  assert.equal(client.experimentalPending, true);
+  const reply = Uint8Array.from([0x23, 13, 0x94, 0x11, 0x22, 0x33, 0x44, 0x05, 0x56, 0x56, 0x56, 0x66, 0]);
+  reply[12] = reply.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 0xff;
+  device.notifier.pushBytes(reply);
+  assert.equal(await network, "received");
+  const exported = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of ["private-query-device", "11223344", "VVVVVV", "23 0A 25"]) assert.equal(exported.includes(secret), false);
+  assert.equal(events.some(event => event.type === "notice" && /VIN|4G/.test(event.message)), false);
+  assert.equal(device.writer.sent.filter(frame => frame === String.fromCharCode(...experimentalQueryCommand("11223344", "05", "vin-list"))).length, 1);
+  const pending = client.experimentalQuery("vin-list");
+  client.disconnect();
+  await assert.rejects(pending, /结果未知/);
+  assert.equal(client.experimentalIdentityReady, false);
+});
+
 test("实验档位遇设备拒绝或断线不报成功，也不自动重试", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("private-experiment-device");
   const client = new ChargerClient({ requestDevice: async () => device }, () => {});
   await client.chooseDevice(2); await client.login("12345", false); await tick();
-  const denied = client.experimentalGear("00000000", "00", 0);
+  device.notifier.pushBytes(binaryReport(1));
+  const denied = client.experimentalGear(0);
   device.notifier.pushBytes(binaryGearReply(0));
   await assert.rejects(denied, /拒绝|结果未知/);
-  const pending = client.experimentalGear("00000000", "00", 0);
+  const pending = client.experimentalGear(0);
   client.disconnect();
   await assert.rejects(pending, /结果未知/);
   assert.equal(client.experimentalPending, false);
+  assert.equal(client.experimentalIdentityReady, false);
 });
