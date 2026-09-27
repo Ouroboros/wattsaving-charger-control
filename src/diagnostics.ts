@@ -17,8 +17,26 @@ type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const KEY = "wattsaving-diagnostics-v1";
 const MAX_ENTRIES = 160;
 const MAX_CHARS = 32000;
-const HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin/i;
+const HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin|raw|payload|frame|message/i;
+const SAFE_ERROR_NAMES = new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError"]);
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// 不记录浏览器/设备自由文本错误；只记录有限的异常类别和推断的失败阶段原因。
+export function diagnosticError(error: unknown): { kind: string; reason: string } {
+  const name = error instanceof Error ? error.name : "unknown";
+  const kind = SAFE_ERROR_NAMES.has(name) ? name : "other";
+  const text = `${name} ${error instanceof Error ? error.message : ""}`.toLowerCase();
+  const reason = /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" :
+    /not.?found|unknown service|unknown characteristic|unavailable|not available|\bmissing\b|does not exist|no such/.test(text) ? "not-found" :
+    /permission|not.?allowed|security|unauthori[sz]ed|access denied/.test(text) ? "permission" :
+    /bluetooth.*(?:off|disabled)|powered off/.test(text) ? "bluetooth-off" :
+    /disconnect|not connected|connection lost/.test(text) ? "disconnected" :
+    /time.?out/.test(text) ? "timeout" :
+    /unsupported|not supported|not implemented/.test(text) ? "unsupported" :
+    /busy|in progress/.test(text) ? "busy" :
+    /length|too long|exceed|\bmtu\b/.test(text) ? "size-or-mtu" : "unspecified";
+  return { kind, reason };
+}
 
 export class Diagnostics {
   private readonly storage: Store | null;
@@ -51,6 +69,7 @@ export class Diagnostics {
     return safe
       .replace(/@%PD-100-0-181-\d{5}-@/gi, "[AUTH_FRAME]")
       .replace(/80100000\d{5}000006\d?/g, "[AUTH_FRAME]")
+      .replace(/@%[a-z]{2}-[^@\r\n]{0,600}-@/gi, "[BLE_FRAME]")
       .replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, "[DEVICE_ID]")
       .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[DEVICE_ID]")
       .replace(/(?:[a-z]:\\|\/mnt\/|\/Users\/|\/home\/)[^\s"']+/gi, "[LOCAL_PATH]")
@@ -59,7 +78,7 @@ export class Diagnostics {
   }
   private cleanData(data: Record<string, DiagnosticValue>): Record<string, DiagnosticValue> {
     const safe: Record<string, DiagnosticValue> = {};
-    for (const [key, value] of Object.entries(data).slice(0, 12)) {
+    for (const [key, value] of Object.entries(data).slice(0, 16)) {
       const field = key.replace(/[^a-z0-9_-]/gi, "_").slice(0, 32);
       if (!field) continue;
       safe[field] = HIDDEN_FIELD.test(field) ? "[REDACTED]" : typeof value === "string" ? this.sanitize(value) :
@@ -84,7 +103,7 @@ export class Diagnostics {
   exportText(environment: DiagnosticEnvironment): string {
     // 再清洗一次：将此前存储的记录与新加入的隐藏词一并脱敏。
     const entries = this.entries.map(entry => this.cleanEntry(entry));
-    return ["WattSaving diagnostics v1 (no passwords, device IDs or raw BLE frames)",
+    return ["WattSaving diagnostics v2 (no passwords, device IDs or raw BLE frames)",
       `environment: ${JSON.stringify(environment)}`,
       `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
       ...entries.map(entry => JSON.stringify(entry))].join("\n");

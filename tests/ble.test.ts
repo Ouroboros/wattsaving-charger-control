@@ -117,6 +117,11 @@ test("GATT 已连接就记住设备；未确认的验证码不保存，下次无
   assert.equal(restored.authorized, false);
   assert.equal(chooserCalls, 0);
   restored.disconnect();
+  const log = new Diagnostics(null);
+  const empty = new ChargerClient({ requestDevice: async () => device, getDevices: async () => [] }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  assert.equal(await empty.restore(), false);
+  assert.ok(log.recent.some(entry => entry.event === "restore-result" && entry.data.candidates === 0 && entry.data.found === false));
 });
 test("密码不会发给另一台设备；设备拒绝缓存密码则删除并要求重新输入", async () => {
   const storage = new MemoryStorage();
@@ -170,7 +175,9 @@ test("真实 BLE 生命周期日志覆盖授权、控制与回执且不输出密
   await client.control("start");
   client.disconnect();
   const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
-  for (const event of ["chooser-open", "gatt-connected", "service-found", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
+  for (const event of ["chooser-open", "gatt-connected", "service-found", "characteristic-methods", "notifications-start", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "auth-saved", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
+  assert.ok(log.recent.some(entry => entry.event === "tx-written" && entry.data.method === "with-response"));
+  assert.ok(log.recent.some(entry => entry.event === "auth-saved" && entry.data.remembered === true));
   for (const secret of ["98765", "private-device-id", "测试设备", "@%PD-100"]) assert.equal(output.includes(secret), false);
 });
 test("特征不匹配时记录逐服务 UUID 短码和属性，自定义 UUID 不泄露", async () => {
@@ -214,7 +221,79 @@ test("特征不匹配时记录逐服务 UUID 短码和属性，自定义 UUID �
   assert.equal(found[1]?.write, true);
   assert.equal(found[2]?.indicate, true);
   assert.equal(found[2]?.writeWithoutResponse, true);
+  assert.equal(found[2]?.writeResponseMethod, false);
+  assert.ok(entries.some(entry => entry.event === "service-unavailable" && entry.data.service === "ff00" && entry.data.reason === "not-found"));
+  assert.ok(entries.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ffe5"));
   for (const secret of [device.id, device.name, customUuid, "@%PD-100"]) assert.equal(output.includes(secret), false);
+});
+test("选择器拒绝与通知启动失败均记录阶段及安全错误类别", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const log = new Diagnostics(null);
+  const diagnose = (event: string, data?: Record<string, string | number | boolean | null>, level?: "info" | "warn" | "error") => log.add(event, data, level);
+  const cancelled = new DOMException("User cancelled on private-device-id", "NotFoundError");
+  const declined = new ChargerClient({ requestDevice: async () => { throw cancelled; } }, () => {}, () => true, diagnose);
+  await assert.rejects(declined.chooseDevice(), /User cancelled/);
+  const device = new FakeDevice("private-device-id");
+  device.notifier.startNotifications = async () => { throw new Error("permission denied for private-device-name 54321"); };
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true, diagnose);
+  await assert.rejects(client.chooseDevice(2), /permission denied/);
+  assert.ok(log.recent.some(entry => entry.event === "chooser-error" && entry.data.reason === "cancelled"));
+  assert.ok(log.recent.some(entry => entry.event === "notifications-error" && entry.data.reason === "permission"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "notifications"));
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of ["private-device-id", "private-device-name", "54321"]) assert.equal(output.includes(secret), false);
+});
+test("无法解析的通知与写入超出 MTU 只留下计数、写入方式和错误类别", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  device.notifier.push("private-raw-frame-payload");
+  device.notifier.push("@%DP-103-0-181-1-@");
+  device.notifier.push("@%DP-117-0-181-1-@");
+  assert.ok(log.recent.some(entry => entry.event === "control-ack-ignored" && entry.data.reason === "no-pending"));
+  assert.ok(log.recent.some(entry => entry.event === "reservation-reply" && entry.data.matched === false));
+  device.writer.writeValueWithResponse = async () => { throw new Error("MTU exceeded private-device-id 54321"); };
+  await assert.rejects(client.login("54321", false), /发送授权报文失败/);
+  assert.ok(log.recent.some(entry => entry.event === "rx-notification" && entry.data.parsed === 0));
+  assert.ok(log.recent.some(entry => entry.event === "tx-error" && entry.data.reason === "size-or-mtu" && entry.data.method === "with-response"));
+  assert.ok(log.recent.some(entry => entry.event === "auth-unconfirmed" && entry.data.reason === "write-error"));
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of ["private-raw-frame-payload", "private-device-id", "54321"]) assert.equal(output.includes(secret), false);
+  client.disconnect();
+});
+test("服务特征读取失败记录服务代码、错误类别和失败阶段", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  device.gatt.getPrimaryService = async uuid => {
+    if (uuid.startsWith("0000ff00")) return { getCharacteristics: async () => { throw new DOMException("permission denied private-device-id", "SecurityError"); } };
+    throw new DOMException("service missing", "NotFoundError");
+  };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await assert.rejects(client.chooseDevice(), /permission denied/);
+  assert.ok(log.recent.some(entry => entry.event === "characteristics-error" && entry.data.service === "ff00" && entry.data.kind === "SecurityError" && entry.data.reason === "permission"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ff00"));
+  assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
+});
+test("连续相同状态不会挤掉服务发现阶段的日志", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  await client.login("98765", false); await tick();
+  for (let i = 0; i < 320; i++) device.notifier.push(stateFrame("2"));
+  const statusEntries = log.recent.filter(entry => entry.event === "status");
+  assert.ok(statusEntries.length < 20);
+  assert.ok(log.recent.some(entry => entry.event === "service-found" && entry.data.service === "ff00"));
+  assert.ok(log.recent.some(entry => entry.event === "characteristic-discovered"));
+  assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
+  client.disconnect();
 });
 test("预约和取消需设备匹配回执；拒绝及断线不冒充成功；日志不含原始报文", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();

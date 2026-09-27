@@ -153,8 +153,109 @@
     }
   };
 
+  // src/diagnostics.ts
+  var KEY = "wattsaving-diagnostics-v1";
+  var MAX_ENTRIES = 160;
+  var MAX_CHARS = 32e3;
+  var HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin|raw|payload|frame|message/i;
+  var SAFE_ERROR_NAMES = /* @__PURE__ */ new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError"]);
+  var escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  function diagnosticError(error) {
+    const name = error instanceof Error ? error.name : "unknown";
+    const kind = SAFE_ERROR_NAMES.has(name) ? name : "other";
+    const text2 = `${name} ${error instanceof Error ? error.message : ""}`.toLowerCase();
+    const reason = /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" : /not.?found|unknown service|unknown characteristic|unavailable|not available|\bmissing\b|does not exist|no such/.test(text2) ? "not-found" : /permission|not.?allowed|security|unauthori[sz]ed|access denied/.test(text2) ? "permission" : /bluetooth.*(?:off|disabled)|powered off/.test(text2) ? "bluetooth-off" : /disconnect|not connected|connection lost/.test(text2) ? "disconnected" : /time.?out/.test(text2) ? "timeout" : /unsupported|not supported|not implemented/.test(text2) ? "unsupported" : /busy|in progress/.test(text2) ? "busy" : /length|too long|exceed|\bmtu\b/.test(text2) ? "size-or-mtu" : "unspecified";
+    return { kind, reason };
+  }
+  var Diagnostics = class {
+    constructor(storage) {
+      __publicField(this, "storage");
+      __publicField(this, "secrets", /* @__PURE__ */ new Set());
+      __publicField(this, "entries", []);
+      __publicField(this, "persistOk", true);
+      if (storage !== void 0) this.storage = storage;
+      else {
+        try {
+          this.storage = typeof localStorage !== "undefined" ? localStorage : null;
+        } catch {
+          this.storage = null;
+        }
+      }
+      this.persistOk = this.storage !== null;
+      try {
+        const value = JSON.parse(this.storage?.getItem(KEY) ?? "null");
+        if (Array.isArray(value)) {
+          this.entries = value.slice(-MAX_ENTRIES).filter(
+            (entry) => !!entry && typeof entry === "object" && typeof entry.at === "string" && typeof entry.event === "string" && ["info", "warn", "error"].includes(entry.level) && !!entry.data && typeof entry.data === "object"
+          ).map((entry) => this.cleanEntry(entry));
+        }
+      } catch {
+        this.persistOk = false;
+      }
+    }
+    get storageAvailable() {
+      return this.persistOk;
+    }
+    get recent() {
+      return this.entries;
+    }
+    hide(value) {
+      if (value.length >= 3) this.secrets.add(value);
+    }
+    sanitize(input) {
+      let safe = input.slice(0, 600);
+      for (const secret of this.secrets) safe = safe.replace(new RegExp(escapeRegExp(secret), "gi"), "[REDACTED]");
+      return safe.replace(/@%PD-100-0-181-\d{5}-@/gi, "[AUTH_FRAME]").replace(/80100000\d{5}000006\d?/g, "[AUTH_FRAME]").replace(/@%[a-z]{2}-[^@\r\n]{0,600}-@/gi, "[BLE_FRAME]").replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, "[DEVICE_ID]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[DEVICE_ID]").replace(/(?:[a-z]:\\|\/mnt\/|\/Users\/|\/home\/)[^\s"']+/gi, "[LOCAL_PATH]").replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, "[EMAIL]").replace(/\b\d{5,}\b/g, "[NUMBER]");
+    }
+    cleanData(data) {
+      const safe = {};
+      for (const [key, value] of Object.entries(data).slice(0, 16)) {
+        const field = key.replace(/[^a-z0-9_-]/gi, "_").slice(0, 32);
+        if (!field) continue;
+        safe[field] = HIDDEN_FIELD.test(field) ? "[REDACTED]" : typeof value === "string" ? this.sanitize(value) : typeof value === "number" && Number.isFinite(value) ? value : typeof value === "boolean" || value === null ? value : "[REDACTED]";
+      }
+      return safe;
+    }
+    cleanEntry(entry) {
+      return { at: this.sanitize(entry.at).slice(0, 32), level: entry.level, event: entry.event.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 60), data: this.cleanData(entry.data) };
+    }
+    add(event, data = {}, level = "info") {
+      const entry = this.cleanEntry({ at: (/* @__PURE__ */ new Date()).toISOString(), level, event, data });
+      this.entries.push(entry);
+      if (this.entries.length > MAX_ENTRIES) this.entries.shift();
+      let json = JSON.stringify(this.entries);
+      while (json.length > MAX_CHARS && this.entries.length > 1) {
+        this.entries.shift();
+        json = JSON.stringify(this.entries);
+      }
+      try {
+        this.storage?.setItem(KEY, json);
+      } catch {
+        this.persistOk = false;
+      }
+    }
+    exportText(environment2) {
+      const entries = this.entries.map((entry) => this.cleanEntry(entry));
+      return [
+        "WattSaving diagnostics v2 (no passwords, device IDs or raw BLE frames)",
+        `environment: ${JSON.stringify(environment2)}`,
+        `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
+        ...entries.map((entry) => JSON.stringify(entry))
+      ].join("\n");
+    }
+    clear() {
+      this.entries = [];
+      this.secrets.clear();
+      try {
+        this.storage?.removeItem(KEY);
+      } catch {
+        this.persistOk = false;
+      }
+    }
+  };
+
   // src/ble.ts
-  var KEY = "wattsaving-ble-devices-v1";
+  var KEY2 = "wattsaving-ble-devices-v1";
   var UUID = (short) => `0000${short}-0000-1000-8000-00805f9b34fb`;
   var SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
   var NOTIFY = /* @__PURE__ */ new Set([UUID("ff01"), UUID("ffe4")]);
@@ -193,6 +294,11 @@
       __publicField(this, "writer", null);
       __publicField(this, "listener", null);
       __publicField(this, "decoder", new FrameDecoder());
+      __publicField(this, "rxNotifications", 0);
+      __publicField(this, "rxBytes", 0);
+      __publicField(this, "decodedFrames", 0);
+      __publicField(this, "statusFrames", 0);
+      __publicField(this, "lastStatusSignature", "");
       __publicField(this, "epoch", 0);
       __publicField(this, "sniffTimer", null);
       __publicField(this, "autoLoginTried", false);
@@ -239,7 +345,7 @@
     }
     loadVault() {
       try {
-        const parsed = JSON.parse(localStorage.getItem(KEY) ?? "null");
+        const parsed = JSON.parse(localStorage.getItem(KEY2) ?? "null");
         if (parsed && typeof parsed === "object" && "devices" in parsed && "lastId" in parsed) {
           const value = parsed;
           if (typeof value.lastId === "string" && value.devices && typeof value.devices === "object") return value;
@@ -251,9 +357,12 @@
     storeVault(vault) {
       this.fallbackVault = vault;
       try {
-        localStorage.setItem(KEY, JSON.stringify(vault));
+        localStorage.setItem(KEY2, JSON.stringify(vault));
+        return true;
       } catch {
+        this.diagnose("device-storage-error", { operation: "write" }, "warn");
         this.emit({ type: "notice", message: "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u5B58\u50A8\uFF1B\u672C\u6B21\u8BBE\u5907\u548C\u5BC6\u7801\u4E0D\u4F1A\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u4FDD\u7559\u3002" });
+        return false;
       }
     }
     rememberConnectedDevice(device) {
@@ -265,8 +374,8 @@
       const previous = vault.devices[device.id];
       vault.lastId = device.id;
       vault.devices[device.id] = { ...previous, name: device.name || previous?.name || "\u672A\u547D\u540D\u8BBE\u5907" };
-      this.storeVault(vault);
-      this.diagnose("device-remembered", { known: !!previous });
+      const persisted = this.storeVault(vault);
+      this.diagnose("device-remembered", { known: !!previous, persisted });
     }
     forgetPassword() {
       const id = this.device?.id ?? this.loadVault().lastId;
@@ -288,27 +397,34 @@
     async restore() {
       const id = this.loadVault().lastId;
       if (!id || !this.adapter.getDevices || !this.enabled()) {
-        this.diagnose("restore-skipped", { remembered: !!id, getDevices: !!this.adapter.getDevices });
+        const reason = !id ? "no-record" : !this.adapter.getDevices ? "api-unavailable" : "control-disabled";
+        this.diagnose("restore-skipped", { reason, remembered: !!id, getDevices: !!this.adapter.getDevices });
         return false;
       }
       try {
         this.diagnose("restore-search");
         const devices = await this.adapter.getDevices();
         const remembered = devices.find((device) => device.id === id);
-        this.diagnose("restore-result", { found: !!remembered, candidates: devices.length });
+        this.diagnose("restore-result", { found: !!remembered, candidates: devices.length, enabled: this.enabled() });
         if (!remembered || !this.enabled()) return false;
         await this.connect(remembered);
         return true;
       } catch (error) {
-        this.diagnose("restore-error", { kind: error instanceof Error ? error.name : "unknown" }, "warn");
+        this.diagnose("restore-error", diagnosticError(error), "warn");
         this.emit({ type: "notice", message: `\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u5931\u8D25\uFF1A${message(error)}\uFF1B\u8BF7\u70B9\u51FB\u9009\u62E9\u8BBE\u5907\u3002` });
         return false;
       }
     }
     async chooseDevice(protocol) {
-      this.diagnose("chooser-open");
-      const device = await this.adapter.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
-      this.diagnose("chooser-selected", { named: !!device.name });
+      this.diagnose("chooser-open", { optionalServices: SERVICES.length });
+      let device;
+      try {
+        device = await this.adapter.requestDevice({ acceptAllDevices: true, optionalServices: SERVICES });
+      } catch (error) {
+        this.diagnose("chooser-error", diagnosticError(error), "warn");
+        throw error;
+      }
+      this.diagnose("chooser-selected", { named: !!device.name, hasGatt: !!device.gatt, hasId: !!device.id });
       if (!this.enabled()) return;
       await this.connect(device, protocol);
     }
@@ -317,6 +433,7 @@
       this.disconnect();
       const epoch = this.epoch;
       this.device = device;
+      let stage = "gatt";
       this.diagnose("gatt-connect-start");
       this.setPhase("connecting", `\u6B63\u5728\u8FDE\u63A5 ${device.name || "\u672A\u547D\u540D\u8BBE\u5907"}\u2026`);
       try {
@@ -331,21 +448,25 @@
         this.rememberConnectedDevice(device);
         device.addEventListener("gattserverdisconnected", this.onDisconnected);
         let notifier = null, writer = null;
+        let notifyService = "none", writeService = "none";
         for (const uuid of SERVICES) {
+          const serviceCode = uuid.slice(4, 8);
+          stage = `service-${serviceCode}`;
           let service;
           try {
             service = await this.server.getPrimaryService(uuid);
-          } catch {
-            this.diagnose("service-unavailable", { service: uuid.slice(4, 8) });
+          } catch (error) {
+            const details = diagnosticError(error);
+            this.diagnose("service-unavailable", { service: serviceCode, ...details }, details.reason === "not-found" ? "info" : "warn");
             continue;
           }
-          const serviceCode = uuid.slice(4, 8);
           this.diagnose("service-found", { service: serviceCode });
+          stage = `characteristics-${serviceCode}`;
           let characteristics;
           try {
             characteristics = await service.getCharacteristics();
           } catch (error) {
-            this.diagnose("characteristics-error", { service: serviceCode, kind: error instanceof Error ? error.name : "unknown" }, "warn");
+            this.diagnose("characteristics-error", { service: serviceCode, ...diagnosticError(error) }, "warn");
             throw error;
           }
           this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
@@ -356,26 +477,57 @@
               index,
               uuid: diagnosticUuid(characteristic.uuid),
               propertiesAvailable: !!properties,
+              read: !!properties?.read,
               notify: !!properties?.notify,
               indicate: !!properties?.indicate,
               write: !!properties?.write,
-              writeWithoutResponse: !!properties?.writeWithoutResponse
+              writeWithoutResponse: !!properties?.writeWithoutResponse,
+              notifyMethod: typeof characteristic.startNotifications === "function",
+              writeResponseMethod: typeof characteristic.writeValueWithResponse === "function",
+              writeNoResponseMethod: typeof characteristic.writeValueWithoutResponse === "function",
+              writeLegacyMethod: typeof characteristic.writeValue === "function"
             });
             const id = characteristic.uuid.toLowerCase();
-            if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) notifier = characteristic;
-            if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) writer = characteristic;
+            if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) {
+              notifier = characteristic;
+              notifyService = serviceCode;
+            }
+            if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) {
+              writer = characteristic;
+              writeService = serviceCode;
+            }
           }
           if (notifier && writer) break;
         }
-        this.diagnose("characteristics", { notify: !!notifier, write: !!writer });
+        this.diagnose("characteristics", {
+          notify: !!notifier,
+          write: !!writer,
+          notifyService,
+          notifyUuid: diagnosticUuid(notifier?.uuid),
+          writeService,
+          writeUuid: diagnosticUuid(writer?.uuid)
+        });
         if (!notifier || !writer) throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
         this.writer = writer;
         this.listener = (event) => {
           const view = event.target?.value;
           if (view && epoch === this.epoch) this.onBytes(view);
         };
+        this.diagnose("characteristic-methods", {
+          notifyMethod: typeof notifier.startNotifications === "function",
+          writeResponse: typeof writer.writeValueWithResponse === "function",
+          writeNoResponse: typeof writer.writeValueWithoutResponse === "function",
+          writeLegacy: typeof writer.writeValue === "function"
+        });
         notifier.addEventListener("characteristicvaluechanged", this.listener);
-        await notifier.startNotifications();
+        stage = "notifications";
+        this.diagnose("notifications-start", { notify: !!notifier.properties?.notify, indicate: !!notifier.properties?.indicate });
+        try {
+          await notifier.startNotifications();
+        } catch (error) {
+          this.diagnose("notifications-error", diagnosticError(error), "error");
+          throw error;
+        }
         if (epoch !== this.epoch) return;
         this.diagnose("notifications-started");
         if (!this.protocol) this.setPhase("detecting", "\u5DF2\u8FDE\u63A5\uFF0C\u7B49\u5F85\u8BBE\u5907\u62A5\u6587\u4EE5\u8FA8\u8BC6\u534F\u8BAE\u2026");
@@ -383,6 +535,7 @@
         else if (!this.protocol) this.sniffTimer = setTimeout(() => {
           if (epoch !== this.epoch || this.protocol) return;
           const cached = this.loadVault().devices[device.id]?.protocol;
+          this.diagnose("protocol-sniff-expired", { notifications: this.rxNotifications, bytes: this.rxBytes, parsed: this.decodedFrames, cached: cached === 1 || cached === 2 }, "warn");
           if (cached === 1 || cached === 2) this.chooseProtocol(cached, "\u4E0A\u6B21\u6210\u529F\u7684\u534F\u8BAE\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4");
           else {
             this.setPhase("password", "\u6CA1\u6709\u6536\u5230\u534F\u8BAE\u62A5\u6587\uFF1B\u8BF7\u624B\u52A8\u9009\u62E9\u65E7\u7248\u6216\u65B0\u7248\u534F\u8BAE\uFF0C\u518D\u8F93\u5165\u5BC6\u7801\u3002");
@@ -390,7 +543,7 @@
           }
         }, 5e3);
       } catch (error) {
-        this.diagnose("gatt-connect-error", { kind: error instanceof Error ? error.name : "unknown" }, "error");
+        this.diagnose("gatt-connect-error", { stage, ...diagnosticError(error) }, "error");
         if (epoch === this.epoch) {
           this.disconnect();
           this.emit({ type: "notice", message: `\u8FDE\u63A5\u5931\u8D25\uFF1A${message(error)}` });
@@ -412,6 +565,7 @@
         this.diagnose("auth-cached-available");
         this.autoLoginTried = true;
         void this.login(saved.password, true).catch((error) => {
+          this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
           this.forgetPassword();
           this.setPhase("password", `\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF1A${message(error)}`);
           this.emit({ type: "auth-needed", message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
@@ -428,17 +582,17 @@
       this.diagnose("auth-request", { version: this.protocol, remember });
       this.setPhase("authenticating", "\u6B63\u5728\u53D1\u9001\u9A8C\u8BC1\u7801\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026");
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.rejectAuth(new Error("\u6388\u6743\u8D85\u65F6\uFF0C\u4E0D\u80FD\u786E\u8BA4\u8BBE\u5907\u662F\u5426\u63A5\u53D7\u5BC6\u7801")), 9e3);
+        const timer = setTimeout(() => this.rejectAuth(new Error("\u6388\u6743\u8D85\u65F6\uFF0C\u4E0D\u80FD\u786E\u8BA4\u8BBE\u5907\u662F\u5426\u63A5\u53D7\u5BC6\u7801"), "timeout"), 9e3);
         this.pendingAuth = { resolve, reject, timer, password, remember };
-        void this.write(frame, "auth").catch((error) => this.rejectAuth(new Error(`\u53D1\u9001\u6388\u6743\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`)));
+        void this.write(frame, "auth").catch((error) => this.rejectAuth(new Error(`\u53D1\u9001\u6388\u6743\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
     }
-    rejectAuth(error) {
+    rejectAuth(error, reason = "unknown") {
       if (!this.pendingAuth) return;
       const pending = this.pendingAuth;
       this.pendingAuth = null;
       clearTimeout(pending.timer);
-      this.diagnose("auth-unconfirmed", { connected: !!this.server?.connected }, "warn");
+      this.diagnose("auth-unconfirmed", { connected: !!this.server?.connected, reason }, "warn");
       if (this.server?.connected) this.setPhase("password", error.message);
       pending.reject(error);
     }
@@ -458,9 +612,9 @@
       const frame = command(this.protocol, action);
       this.diagnose("control-request", { action, state: s.state });
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.rejectControl(new Error("\u8BBE\u5907\u672A\u8FD4\u56DE\u786E\u8BA4\u72B6\u6001\uFF1B\u5B9E\u9645\u72B6\u6001\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5")), 1e4);
+        const timer = setTimeout(() => this.rejectControl(new Error("\u8BBE\u5907\u672A\u8FD4\u56DE\u786E\u8BA4\u72B6\u6001\uFF1B\u5B9E\u9645\u72B6\u6001\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 1e4);
         this.pendingControl = { action, resolve, reject, timer };
-        void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
+        void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
     }
     submitReservation(reservation) {
@@ -480,25 +634,25 @@
       const frame = reservationCommand(this.protocol, action, reservation);
       this.diagnose("reservation-request", { action, end: reservation?.end.kind ?? "none", state: status2.state });
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.rejectReservation(new Error("\u672A\u6536\u5230\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u5B9E\u9645\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5")), 1e4);
+        const timer = setTimeout(() => this.rejectReservation(new Error("\u672A\u6536\u5230\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u5B9E\u9645\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u5237\u65B0\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 1e4);
         this.pendingReservation = { action, resolve, reject, timer };
-        void this.write(frame, `reservation-${action}`).catch((error) => this.rejectReservation(new Error(`\u53D1\u9001\u9884\u7EA6\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`)));
+        void this.write(frame, `reservation-${action}`).catch((error) => this.rejectReservation(new Error(`\u53D1\u9001\u9884\u7EA6\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
     }
-    rejectReservation(error) {
+    rejectReservation(error, reason = "unknown") {
       if (!this.pendingReservation) return;
       const pending = this.pendingReservation;
       this.pendingReservation = null;
       clearTimeout(pending.timer);
-      this.diagnose("reservation-unconfirmed", { action: pending.action }, "warn");
+      this.diagnose("reservation-unconfirmed", { action: pending.action, reason }, "warn");
       pending.reject(error);
     }
-    rejectControl(error) {
+    rejectControl(error, reason = "unknown") {
       if (!this.pendingControl) return;
       const pending = this.pendingControl;
       this.pendingControl = null;
       clearTimeout(pending.timer);
-      this.diagnose("control-unconfirmed", { action: pending.action }, "warn");
+      this.diagnose("control-unconfirmed", { action: pending.action, reason }, "warn");
       pending.reject(error);
     }
     confirmControl() {
@@ -511,20 +665,36 @@
     }
     onBytes(view) {
       const frames = this.decoder.feed(decodeAscii(view));
-      this.diagnose("rx-notification", { bytes: view.byteLength, frames: frames.length });
+      this.rxNotifications++;
+      this.rxBytes += view.byteLength;
+      this.decodedFrames += frames.length;
+      if (frames.some((frame) => frame.type !== "status") || this.rxNotifications <= 6 || !(this.rxNotifications & this.rxNotifications - 1)) {
+        this.diagnose("rx-notification", {
+          bytes: view.byteLength,
+          parsed: frames.length,
+          notifications: this.rxNotifications,
+          totalBytes: this.rxBytes,
+          totalParsed: this.decodedFrames
+        });
+      }
       for (const frame of frames) this.onFrame(frame);
     }
     onFrame(frame) {
-      this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
+      if (frame.type !== "status") this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
       if (!this.protocol) this.chooseProtocol(frame.protocol, "\u8BBE\u5907\u901A\u77E5");
       if (frame.protocol !== this.protocol) {
+        this.diagnose("protocol-mismatch", { expected: this.protocol, actual: frame.protocol, type: frame.type }, "warn");
         this.emit({ type: "notice", message: "\u6536\u5230\u53E6\u4E00\u79CD\u534F\u8BAE\u7684\u62A5\u6587\uFF1B\u5DF2\u5FFD\u7565\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5207\u6362\u6388\u6743\u534F\u8BAE\u3002" });
+        return;
+      }
+      if (frame.type === "auth" && !this.pendingAuth) {
+        this.diagnose("auth-reply-ignored", { reason: "no-pending" }, "warn");
         return;
       }
       if (frame.type === "auth" && this.pendingAuth) {
         this.diagnose("auth-reply", { accepted: frame.ok });
         if (!frame.ok) {
-          this.rejectAuth(new Error("\u8BBE\u5907\u62D2\u7EDD\u84DD\u7259\u9A8C\u8BC1\u7801"));
+          this.rejectAuth(new Error("\u8BBE\u5907\u62D2\u7EDD\u84DD\u7259\u9A8C\u8BC1\u7801"), "rejected");
           return;
         }
         const pending = this.pendingAuth;
@@ -534,16 +704,18 @@
         const device = this.device;
         vault.lastId = device.id;
         vault.devices[device.id] = { name: device.name || "\u672A\u547D\u540D\u8BBE\u5907", protocol: this.protocol, ...pending.remember ? { password: pending.password } : {} };
-        this.storeVault(vault);
+        const persisted = this.storeVault(vault);
+        this.diagnose("auth-saved", { remembered: pending.remember, persisted, version: this.protocol });
         this.setPhase("ready", "\u8BBE\u5907\u786E\u8BA4\u6388\u6743\u6210\u529F\uFF1B\u53EF\u4EE5\u8BFB\u53D6\u72B6\u6001\u5E76\u63A7\u5236\u3002");
         pending.resolve();
         void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}` }));
         return;
       }
       if (frame.type === "reservation") {
-        this.diagnose("reservation-reply", { action: frame.action, accepted: frame.ok });
         const pending = this.pendingReservation;
-        if (!pending || pending.action !== frame.action) return;
+        const matched = !!pending && pending.action === frame.action;
+        this.diagnose("reservation-reply", { action: frame.action, accepted: frame.ok, matched });
+        if (!matched || !pending) return;
         this.pendingReservation = null;
         clearTimeout(pending.timer);
         if (!frame.ok) {
@@ -555,9 +727,26 @@
         pending.resolve();
         return;
       }
+      if (frame.type === "status" && !this.authorized) {
+        this.diagnose("status-ignored", { reason: "not-authorized" });
+        return;
+      }
       if (frame.type === "status" && this.authorized) {
         if (this.reservationAccepted === false && frame.mode === "3") this.reservationAccepted = null;
-        this.diagnose("status", { state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock });
+        this.statusFrames++;
+        const signature = [frame.state, frame.gunFlag, frame.mode, frame.lock, frame.selfStartFlag].join("|");
+        if (signature !== this.lastStatusSignature || this.statusFrames <= 3 || !(this.statusFrames & this.statusFrames - 1)) {
+          this.diagnose("status", {
+            version: frame.protocol,
+            state: frame.state,
+            gun: frame.gunFlag,
+            mode: frame.mode,
+            lock: frame.lock,
+            selfStart: frame.selfStartFlag,
+            samples: this.statusFrames
+          });
+        }
+        this.lastStatusSignature = signature;
         this.latest = frame;
         this.latestAt = Date.now();
         this.emit({ type: "status", status: frame });
@@ -565,9 +754,11 @@
         if (action === "start" && frame.state === "4" || action === "stop" && frame.state === "2" || action === "unlock" && frame.lock === "0") this.confirmControl();
       }
       if (frame.type === "ack" && this.pendingControl?.action === frame.action) {
-        this.diagnose("control-ack", { action: frame.action, accepted: frame.ok });
-        if (!frame.ok) this.rejectControl(new Error("\u8BBE\u5907\u62D2\u7EDD\u8BE5\u5145\u7535\u64CD\u4F5C"));
+        this.diagnose("control-ack", { action: frame.action, accepted: frame.ok, matched: true });
+        if (!frame.ok) this.rejectControl(new Error("\u8BBE\u5907\u62D2\u7EDD\u8BE5\u5145\u7535\u64CD\u4F5C"), "rejected");
         else this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u63A5\u6536\u64CD\u4F5C\uFF0C\u7B49\u5F85\u72B6\u6001\u53D8\u5316\u518D\u786E\u8BA4\u5B8C\u6210\u3002" });
+      } else if (frame.type === "ack") {
+        this.diagnose("control-ack-ignored", { action: frame.action, reason: this.pendingControl ? "action-mismatch" : "no-pending" }, "warn");
       }
     }
     async write(text2, action) {
@@ -576,14 +767,21 @@
       if (!writer || !this.server?.connected) throw new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00");
       const bytes = encodeAscii(text2);
       this.diagnose("tx-attempt", { action, bytes: bytes.length });
+      let method = "none";
       try {
-        if (writer.properties.write && writer.writeValueWithResponse) await writer.writeValueWithResponse(bytes);
-        else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) await writer.writeValueWithoutResponse(bytes);
-        else if (writer.writeValue) await writer.writeValue(bytes);
-        else throw new Error("\u8BE5\u8BBE\u5907\u7279\u5F81\u4E0D\u53EF\u5199");
-        this.diagnose("tx-written", { action });
+        if (writer.properties.write && writer.writeValueWithResponse) {
+          method = "with-response";
+          await writer.writeValueWithResponse(bytes);
+        } else if (writer.properties.writeWithoutResponse && writer.writeValueWithoutResponse) {
+          method = "without-response";
+          await writer.writeValueWithoutResponse(bytes);
+        } else if (writer.writeValue) {
+          method = "legacy";
+          await writer.writeValue(bytes);
+        } else throw new Error("\u8BE5\u8BBE\u5907\u7279\u5F81\u4E0D\u53EF\u5199");
+        this.diagnose("tx-written", { action, method });
       } catch (error) {
-        this.diagnose("tx-error", { action, kind: error instanceof Error ? error.name : "unknown" }, "error");
+        this.diagnose("tx-error", { action, method, ...diagnosticError(error) }, "error");
         throw error;
       }
     }
@@ -591,9 +789,9 @@
       this.epoch++;
       if (this.sniffTimer) clearTimeout(this.sniffTimer);
       this.sniffTimer = null;
-      this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"));
-      this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
-      this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"));
+      this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"), "disconnect");
+      this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
+      this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       const server = this.server;
       if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
       this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
@@ -611,100 +809,12 @@
       this.autoLoginTried = false;
       this.reservationAccepted = null;
       this.decoder.reset();
+      this.rxNotifications = 0;
+      this.rxBytes = 0;
+      this.decodedFrames = 0;
+      this.statusFrames = 0;
+      this.lastStatusSignature = "";
       this.setPhase("offline", "\u672A\u8FDE\u63A5\u5145\u7535\u6869");
-    }
-  };
-
-  // src/diagnostics.ts
-  var KEY2 = "wattsaving-diagnostics-v1";
-  var MAX_ENTRIES = 160;
-  var MAX_CHARS = 32e3;
-  var HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin/i;
-  var escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  var Diagnostics = class {
-    constructor(storage) {
-      __publicField(this, "storage");
-      __publicField(this, "secrets", /* @__PURE__ */ new Set());
-      __publicField(this, "entries", []);
-      __publicField(this, "persistOk", true);
-      if (storage !== void 0) this.storage = storage;
-      else {
-        try {
-          this.storage = typeof localStorage !== "undefined" ? localStorage : null;
-        } catch {
-          this.storage = null;
-        }
-      }
-      this.persistOk = this.storage !== null;
-      try {
-        const value = JSON.parse(this.storage?.getItem(KEY2) ?? "null");
-        if (Array.isArray(value)) {
-          this.entries = value.slice(-MAX_ENTRIES).filter(
-            (entry) => !!entry && typeof entry === "object" && typeof entry.at === "string" && typeof entry.event === "string" && ["info", "warn", "error"].includes(entry.level) && !!entry.data && typeof entry.data === "object"
-          ).map((entry) => this.cleanEntry(entry));
-        }
-      } catch {
-        this.persistOk = false;
-      }
-    }
-    get storageAvailable() {
-      return this.persistOk;
-    }
-    get recent() {
-      return this.entries;
-    }
-    hide(value) {
-      if (value.length >= 3) this.secrets.add(value);
-    }
-    sanitize(input) {
-      let safe = input.slice(0, 600);
-      for (const secret of this.secrets) safe = safe.replace(new RegExp(escapeRegExp(secret), "gi"), "[REDACTED]");
-      return safe.replace(/@%PD-100-0-181-\d{5}-@/gi, "[AUTH_FRAME]").replace(/80100000\d{5}000006\d?/g, "[AUTH_FRAME]").replace(/\b(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b/gi, "[DEVICE_ID]").replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[DEVICE_ID]").replace(/(?:[a-z]:\\|\/mnt\/|\/Users\/|\/home\/)[^\s"']+/gi, "[LOCAL_PATH]").replace(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi, "[EMAIL]").replace(/\b\d{5,}\b/g, "[NUMBER]");
-    }
-    cleanData(data) {
-      const safe = {};
-      for (const [key, value] of Object.entries(data).slice(0, 12)) {
-        const field = key.replace(/[^a-z0-9_-]/gi, "_").slice(0, 32);
-        if (!field) continue;
-        safe[field] = HIDDEN_FIELD.test(field) ? "[REDACTED]" : typeof value === "string" ? this.sanitize(value) : typeof value === "number" && Number.isFinite(value) ? value : typeof value === "boolean" || value === null ? value : "[REDACTED]";
-      }
-      return safe;
-    }
-    cleanEntry(entry) {
-      return { at: this.sanitize(entry.at).slice(0, 32), level: entry.level, event: entry.event.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 60), data: this.cleanData(entry.data) };
-    }
-    add(event, data = {}, level = "info") {
-      const entry = this.cleanEntry({ at: (/* @__PURE__ */ new Date()).toISOString(), level, event, data });
-      this.entries.push(entry);
-      if (this.entries.length > MAX_ENTRIES) this.entries.shift();
-      let json = JSON.stringify(this.entries);
-      while (json.length > MAX_CHARS && this.entries.length > 1) {
-        this.entries.shift();
-        json = JSON.stringify(this.entries);
-      }
-      try {
-        this.storage?.setItem(KEY2, json);
-      } catch {
-        this.persistOk = false;
-      }
-    }
-    exportText(environment2) {
-      const entries = this.entries.map((entry) => this.cleanEntry(entry));
-      return [
-        "WattSaving diagnostics v1 (no passwords, device IDs or raw BLE frames)",
-        `environment: ${JSON.stringify(environment2)}`,
-        `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
-        ...entries.map((entry) => JSON.stringify(entry))
-      ].join("\n");
-    }
-    clear() {
-      this.entries = [];
-      this.secrets.clear();
-      try {
-        this.storage?.removeItem(KEY2);
-      } catch {
-        this.persistOk = false;
-      }
     }
   };
 
@@ -804,14 +914,11 @@
     if (recentMessages.length > 6) recentMessages.length = 6;
     text("liveLog", recentMessages.join("\n"));
   }
-  function errorKind(error) {
-    return error instanceof Error ? error.name : "unknown";
-  }
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
   }
   function failure(action, error) {
-    diagnostics.add("ui-error", { action, kind: errorKind(error) }, "error");
+    diagnostics.add("ui-error", { action, ...diagnosticError(error) }, "error");
     refreshDiagnostics();
     record(`${action}\u5931\u8D25\uFF1A${errorMessage(error)}`);
   }
@@ -904,14 +1011,23 @@
     void client.login(password, remember).catch((error) => failure("\u6388\u6743", error));
   });
   el("liveRefresh").addEventListener("click", () => {
-    if (!client || !window.confirm("\u5C06\u5411\u5145\u7535\u6869\u53D1\u9001\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u201C\u540C\u6B65\u8BBE\u5907\u65F6\u949F\u201D\u6307\u4EE4\uFF0C\u5E76\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002\u7EE7\u7EED\u5417\uFF1F")) return;
+    if (!client) return;
+    if (!window.confirm("\u5C06\u5411\u5145\u7535\u6869\u53D1\u9001\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u201C\u540C\u6B65\u8BBE\u5907\u65F6\u949F\u201D\u6307\u4EE4\uFF0C\u5E76\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002\u7EE7\u7EED\u5417\uFF1F")) {
+      diagnostics.add("ui-cancelled", { action: "clock-sync" });
+      refreshDiagnostics();
+      return;
+    }
     void client.refresh().catch((error) => failure("\u540C\u6B65\u72B6\u6001", error));
   });
   async function control(action) {
     if (!client) return;
     const name = { start: "\u5F00\u59CB\u5145\u7535", stop: "\u505C\u6B62\u5145\u7535", unlock: "\u89E3\u9664\u7535\u5B50\u9501" }[action];
     if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u6869\u53D1\u9001\u300C${name}\u300D\u6307\u4EE4\uFF1F
-\u6536\u5230\u8BBE\u5907\u72B6\u6001\u53D8\u5316\u540E\u624D\u4F1A\u663E\u793A\u5B8C\u6210\u3002`)) return;
+\u6536\u5230\u8BBE\u5907\u72B6\u6001\u53D8\u5316\u540E\u624D\u4F1A\u663E\u793A\u5B8C\u6210\u3002`)) {
+      diagnostics.add("ui-cancelled", { action });
+      refreshDiagnostics();
+      return;
+    }
     busy = true;
     render();
     record(`\u6B63\u5728\u53D1\u9001\u300C${name}\u300D\u5E76\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026`);
@@ -947,6 +1063,7 @@
       try {
         reservation = selectedReservation();
       } catch (error) {
+        diagnostics.add("reservation-input-error", diagnosticError(error), "warn");
         reservationResult = errorMessage(error);
         record(reservationResult);
         render();
@@ -958,7 +1075,11 @@
 \u5F00\u59CB\uFF1A${localMinute(reservation.start).replace("T", " ")}\uFF08iPhone \u672C\u5730\u65F6\u95F4\uFF09
 \u7ED3\u675F\uFF1A${endLabel(reservation.end)}` : "";
     if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u6869${label}\uFF1F${detail}
-\u4EC5\u6536\u5230\u8BBE\u5907\u5339\u914D\u56DE\u6267\u540E\u624D\u663E\u793A\u6210\u529F\u3002`)) return;
+\u4EC5\u6536\u5230\u8BBE\u5907\u5339\u914D\u56DE\u6267\u540E\u624D\u663E\u793A\u6210\u529F\u3002`)) {
+      diagnostics.add("ui-cancelled", { action: `reservation-${action}` });
+      refreshDiagnostics();
+      return;
+    }
     busy = true;
     reservationResult = `\u6B63\u5728${label}\uFF0C\u7B49\u5F85\u8BBE\u5907\u56DE\u6267\u2026`;
     render();
@@ -1040,17 +1161,22 @@
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
   resetReservationStart();
-  diagnostics.add("app-start", { ...environment() });
+  diagnostics.add("app-start", { ...environment(), schema: 2 });
   refreshDiagnostics(true);
   render();
   setInterval(render, 5e3);
   setInterval(updateReservationCountdown, 1e3);
   document.addEventListener("visibilitychange", updateReservationCountdown);
   if (client?.rememberedName && window.isSecureContext) {
+    diagnostics.add("restore-auto-start", { remembered: true });
+    refreshDiagnostics();
     record("\u5C1D\u8BD5\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\u2026");
     void client.restore().then((restored) => {
       if (!restored) record("\u672A\u627E\u5230\u53EF\u6062\u590D\u7684\u8BBE\u5907\uFF0C\u8BF7\u70B9\u51FB\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u624B\u52A8\u8FDE\u63A5\u3002");
       render();
     });
+  } else {
+    diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
+    refreshDiagnostics();
   }
 })();

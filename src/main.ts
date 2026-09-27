@@ -1,5 +1,5 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
-import { Diagnostics, type DiagnosticEnvironment } from "./diagnostics";
+import { Diagnostics, diagnosticError, type DiagnosticEnvironment } from "./diagnostics";
 import { countdownTo } from "./countdown";
 import { nextMidnight, parseLocalMinute, validateReservation, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
 
@@ -85,10 +85,9 @@ function record(message: string): void {
   if (recentMessages.length > 6) recentMessages.length = 6;
   text("liveLog", recentMessages.join("\n"));
 }
-function errorKind(error: unknown): string { return error instanceof Error ? error.name : "unknown"; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function failure(action: string, error: unknown): void {
-  diagnostics.add("ui-error", { action, kind: errorKind(error) }, "error");
+  diagnostics.add("ui-error", { action, ...diagnosticError(error) }, "error");
   refreshDiagnostics();
   record(`${action}失败：${errorMessage(error)}`);
 }
@@ -171,13 +170,18 @@ el("liveAuthorize").addEventListener("click", () => {
   void client.login(password, remember).catch(error => failure("授权", error));
 });
 el("liveRefresh").addEventListener("click", () => {
-  if (!client || !window.confirm("将向充电桩发送旧应用使用的“同步设备时钟”指令，并等待状态通知。继续吗？")) return;
+  if (!client) return;
+  if (!window.confirm("将向充电桩发送旧应用使用的“同步设备时钟”指令，并等待状态通知。继续吗？")) {
+    diagnostics.add("ui-cancelled", { action: "clock-sync" }); refreshDiagnostics(); return;
+  }
   void client.refresh().catch(error => failure("同步状态", error));
 });
 async function control(action: ControlAction): Promise<void> {
   if (!client) return;
   const name = { start: "开始充电", stop: "停止充电", unlock: "解除电子锁" }[action];
-  if (!window.confirm(`确定向真实充电桩发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) return;
+  if (!window.confirm(`确定向真实充电桩发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) {
+    diagnostics.add("ui-cancelled", { action }); refreshDiagnostics(); return;
+  }
   busy = true; render(); record(`正在发送「${name}」并等待设备确认…`);
   try { await client.control(action); record(`设备状态已确认：${name}。`); }
   catch (error) { failure(name, error); }
@@ -198,11 +202,13 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
   let reservation: Reservation | undefined;
   if (action === "submit") {
     try { reservation = selectedReservation(); }
-    catch (error) { reservationResult = errorMessage(error); record(reservationResult); render(); return; }
+    catch (error) { diagnostics.add("reservation-input-error", diagnosticError(error), "warn"); reservationResult = errorMessage(error); record(reservationResult); render(); return; }
   }
   const label = action === "submit" ? "提交预约" : "取消预约";
   const detail = reservation ? `\n开始：${localMinute(reservation.start).replace("T", " ")}（iPhone 本地时间）\n结束：${endLabel(reservation.end)}` : "";
-  if (!window.confirm(`确定向真实充电桩${label}？${detail}\n仅收到设备匹配回执后才显示成功。`)) return;
+  if (!window.confirm(`确定向真实充电桩${label}？${detail}\n仅收到设备匹配回执后才显示成功。`)) {
+    diagnostics.add("ui-cancelled", { action: `reservation-${action}` }); refreshDiagnostics(); return;
+  }
   busy = true; reservationResult = `正在${label}，等待设备回执…`; render();
   const deviceId = client.currentDevice?.id;
   try {
@@ -261,13 +267,17 @@ el("clearDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
 resetReservationStart();
-diagnostics.add("app-start", { ...environment() });
+diagnostics.add("app-start", { ...environment(), schema: 2 });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);
 setInterval(updateReservationCountdown, 1000);
 document.addEventListener("visibilitychange", updateReservationCountdown);
 if (client?.rememberedName && window.isSecureContext) {
+  diagnostics.add("restore-auto-start", { remembered: true }); refreshDiagnostics();
   record("尝试恢复上次设备的浏览器授权…");
   void client.restore().then(restored => { if (!restored) record("未找到可恢复的设备，请点击「选择 / 更换设备」手动连接。"); render(); });
+} else {
+  diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
+  refreshDiagnostics();
 }
