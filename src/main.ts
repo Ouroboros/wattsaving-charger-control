@@ -1,5 +1,6 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
 import { Diagnostics, type DiagnosticEnvironment } from "./diagnostics";
+import { countdownTo } from "./countdown";
 import { nextMidnight, parseLocalMinute, validateReservation, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T {
@@ -19,6 +20,7 @@ let busy = false;
 let statusAt = 0;
 let reservationResult = "";
 let reservationStartAutomatic = true;
+let confirmedReservation: { deviceId: string; startsAt: number } | null = null;
 const recentMessages: string[] = [];
 const pad = (value: number): string => String(value).padStart(2, "0");
 function localMinute(date: Date): string {
@@ -44,6 +46,21 @@ function selectedReservation(): Reservation {
 }
 function endLabel(end: ReservationEnd): string {
   return end.kind === "full" ? "自动充满" : end.kind === "time" ? `充电 ${end.minutes / 60} 小时` : `充电 ${end.kWh} 度`;
+}
+function updateReservationCountdown(): void {
+  const box = el("reserveCountdownBox");
+  const currentDeviceId = client?.currentDevice?.id;
+  if (!confirmedReservation || currentDeviceId && currentDeviceId !== confirmedReservation.deviceId) { box.hidden = true; return; }
+  const now = Date.now();
+  const status = client?.currentStatus;
+  if (client?.authorized && status && now - statusAt < 20000 && status.state === "4") {
+    confirmedReservation = null;
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  text("reserveCountdown", countdownTo(confirmedReservation.startsAt, now));
+  text("reserveCountdownLabel", now < confirmedReservation.startsAt ? "后开始充电（本地时钟估算）" : "预约时间已到，等待设备状态确认");
 }
 function environment(): DiagnosticEnvironment {
   const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" :
@@ -127,6 +144,7 @@ function render(): void {
   text("reserveState", !client?.authorized ? "连接并授权后可预约。" : client.reservationPending ? "指令已发送，等待设备预约回执；此时勿重复提交。" :
     reservationResult || !fresh ? reservationResult || "等待最新设备状态，操作暂不可用。" : status?.mode === "3" ? "设备通知显示预约模式；可修改或取消。" :
     client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
+  updateReservationCountdown();
 }
 function selectedProtocol(): Version | undefined {
   const value = el<HTMLSelectElement>("liveProtocol").value;
@@ -186,9 +204,15 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
   const detail = reservation ? `\n开始：${localMinute(reservation.start).replace("T", " ")}（iPhone 本地时间）\n结束：${endLabel(reservation.end)}` : "";
   if (!window.confirm(`确定向真实充电桩${label}？${detail}\n仅收到设备匹配回执后才显示成功。`)) return;
   busy = true; reservationResult = `正在${label}，等待设备回执…`; render();
+  const deviceId = client.currentDevice?.id;
   try {
-    if (action === "submit") await client.submitReservation(reservation!);
-    else await client.cancelReservation();
+    if (action === "submit") {
+      await client.submitReservation(reservation!);
+      if (deviceId && client.currentDevice?.id === deviceId) confirmedReservation = { deviceId, startsAt: reservation!.start.getTime() };
+    } else {
+      await client.cancelReservation();
+      if (confirmedReservation?.deviceId === deviceId) confirmedReservation = null;
+    }
     reservationResult = `设备已确认${label}；请核对设备当前预约状态。`;
     record(reservationResult);
   } catch (error) {
@@ -205,7 +229,7 @@ el("liveForgetPassword").addEventListener("click", () => {
 });
 el("liveForgetDevice").addEventListener("click", () => {
   if (!window.confirm("清除本网站保存的全部设备记录和验证码，并断开连接？")) return;
-  client?.forgetDevice(); statusAt = 0; diagnostics.add("device-records-forgotten"); render();
+  client?.forgetDevice(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
 });
 el("copyDiagnostics").addEventListener("click", async () => {
   const value = diagnostics.exportText(environment());
@@ -241,6 +265,8 @@ diagnostics.add("app-start", { ...environment() });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);
+setInterval(updateReservationCountdown, 1000);
+document.addEventListener("visibilitychange", updateReservationCountdown);
 if (client?.rememberedName && window.isSecureContext) {
   record("尝试恢复上次设备的浏览器授权…");
   void client.restore().then(restored => { if (!restored) record("未找到可恢复的设备，请点击「选择 / 更换设备」手动连接。"); render(); });
