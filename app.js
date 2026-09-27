@@ -237,7 +237,7 @@
     exportText(environment2) {
       const entries = this.entries.map((entry) => this.cleanEntry(entry));
       return [
-        "WattSaving diagnostics v3 (no passwords, device IDs or raw BLE frames)",
+        "WattSaving diagnostics v4 (no passwords, device IDs or raw BLE frames)",
         `environment: ${JSON.stringify(environment2)}`,
         `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
         ...entries.map((entry) => JSON.stringify(entry))
@@ -272,9 +272,23 @@
     if (typeof value !== "string") return "missing";
     const id = value.toLowerCase();
     if (/^[0-9a-f]{4}$/.test(id)) return id;
+    if (/^0000[0-9a-f]{4}$/.test(id)) return id.slice(4);
     const base = /^([0-9a-f]{8})-0000-1000-8000-00805f9b34fb$/.exec(id);
     if (base) return base[1].startsWith("0000") ? base[1].slice(4) : base[1];
     return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) ? "custom128" : "unexpected-format";
+  }
+  function comparableUuid(value) {
+    const id = value.toLowerCase();
+    if (/^[0-9a-f]{4}$/.test(id)) return UUID(id);
+    if (/^0000[0-9a-f]{4}$/.test(id)) return `${id}-0000-1000-8000-00805f9b34fb`;
+    return id;
+  }
+  function uuidForm(value) {
+    const id = value.toLowerCase();
+    if (/^[0-9a-f]{4}$/.test(id)) return "short16";
+    if (/^[0-9a-f]{8}$/.test(id)) return "short32";
+    if (/^[0-9a-f]{8}-0000-1000-8000-00805f9b34fb$/.test(id)) return "standard128";
+    return "other";
   }
   function message(error) {
     return error instanceof Error ? error.message : String(error);
@@ -325,9 +339,10 @@
       __publicField(this, "onDisconnected", () => {
         this.diagnose("unexpected-disconnect", {
           stage: this.connectionStage,
+          connected: !!this.server?.connected,
           afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null
         }, "warn");
-        this.disconnect();
+        this.disconnect("gatt-event");
         this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u65AD\u7EBF\uFF1B\u9875\u9762\u6570\u636E\u4E0D\u518D\u89C6\u4E3A\u5B9E\u65F6\u3002" });
       });
       this.adapter = adapter2;
@@ -400,7 +415,7 @@
       }
     }
     forgetDevice() {
-      this.disconnect();
+      this.disconnect("forget-device");
       this.storeVault({ lastId: "", devices: {} });
       this.emit({ type: "notice", message: "\u5DF2\u6E05\u9664\u8BE5\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
     }
@@ -444,7 +459,7 @@
     }
     async connect(device, requested) {
       if (!this.enabled()) throw new Error("\u771F\u673A\u63A7\u5236\u6A21\u5F0F\u672A\u542F\u7528");
-      this.disconnect();
+      this.disconnect("replace-connection");
       const epoch = this.epoch;
       this.device = device;
       let stage = "gatt";
@@ -459,13 +474,19 @@
         if (!device.gatt) throw new Error("\u8BBE\u5907\u4E0D\u63D0\u4F9B GATT \u670D\u52A1");
         const server = await device.gatt.connect();
         if (epoch !== this.epoch || !this.enabled()) {
-          if (server.connected) server.disconnect();
+          this.diagnose("connect-stale", { connected: server.connected, sessionChanged: epoch !== this.epoch, enabled: this.enabled() }, "warn");
+          if (server.connected) {
+            this.diagnose("gatt-disconnect-call", { reason: "stale-connect", stage });
+            server.disconnect();
+            this.diagnose("gatt-disconnect-result", { connected: server.connected });
+          }
           return;
         }
         if (!server.connected) throw new ConnectionInterruptedError();
         this.server = server;
         this.connectedAt = Date.now();
         this.diagnose("gatt-connected");
+        this.diagnose("auth-gate", { stage: "await-characteristics" });
         this.rememberConnectedDevice(device);
         device.addEventListener("gattserverdisconnected", this.onDisconnected);
         const ensureActive = (operation, originalError) => {
@@ -488,6 +509,7 @@
         for (const uuid of SERVICES) {
           const serviceCode = uuid.slice(4, 8);
           markStage(`service-${serviceCode}`);
+          this.diagnose("service-query-start", { service: serviceCode });
           let service;
           try {
             service = await server.getPrimaryService(uuid);
@@ -503,6 +525,7 @@
           servicesFound++;
           this.diagnose("service-found", { service: serviceCode });
           markStage(`characteristics-${serviceCode}`);
+          this.diagnose("characteristics-query-start", { service: serviceCode });
           let characteristics;
           try {
             characteristics = await service.getCharacteristics();
@@ -515,12 +538,18 @@
           this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
           for (const [index, characteristic] of characteristics.entries()) {
             const properties = characteristic.properties;
+            const id = comparableUuid(characteristic.uuid);
             const notifyServiceAllowed = NOTIFY_SERVICES.has(serviceCode);
             const writeServiceAllowed = WRITE_SERVICES.has(serviceCode);
+            const notifyUuidMatch = NOTIFY.has(id);
+            const writeUuidMatch = WRITE.has(id);
+            const selectedNotify = !notifier && notifyServiceAllowed && notifyUuidMatch && !!(properties?.notify || properties?.indicate);
+            const selectedWrite = !writer && writeServiceAllowed && writeUuidMatch && !!(properties?.write || properties?.writeWithoutResponse);
             this.diagnose("characteristic-discovered", {
               service: serviceCode,
               index,
               uuid: diagnosticUuid(characteristic.uuid),
+              uuidForm: uuidForm(characteristic.uuid),
               propertiesAvailable: !!properties,
               read: !!properties?.read,
               notify: !!properties?.notify,
@@ -534,12 +563,25 @@
               notifyServiceAllowed,
               writeServiceAllowed
             });
-            const id = characteristic.uuid.toLowerCase();
-            if (!notifier && notifyServiceAllowed && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) {
+            this.diagnose("characteristic-selection", {
+              service: serviceCode,
+              index,
+              uuid: diagnosticUuid(characteristic.uuid),
+              uuidForm: uuidForm(characteristic.uuid),
+              notifyServiceAllowed,
+              writeServiceAllowed,
+              notifyUuidMatch,
+              writeUuidMatch,
+              notifyProperty: !!(properties?.notify || properties?.indicate),
+              writeProperty: !!(properties?.write || properties?.writeWithoutResponse),
+              selectedNotify,
+              selectedWrite
+            });
+            if (selectedNotify) {
               notifier = characteristic;
               notifyService = serviceCode;
             }
-            if (!writer && writeServiceAllowed && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) {
+            if (selectedWrite) {
               writer = characteristic;
               writeService = serviceCode;
             }
@@ -557,6 +599,7 @@
           writeUuid: diagnosticUuid(writer?.uuid)
         });
         if (!notifier || !writer) {
+          this.diagnose("discovery-missing", { servicesFound, failedServices, notify: !!notifier, write: !!writer }, "error");
           if (!servicesFound) throw new Error(failedServices ? "\u65E0\u6CD5\u8BFB\u53D6\u65E7\u5E94\u7528\u4F7F\u7528\u7684 BLE \u670D\u52A1\uFF1B\u4E0D\u80FD\u5224\u65AD\u7279\u5F81\u662F\u5426\u5B58\u5728" : "\u672A\u627E\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684 BLE \u670D\u52A1\uFF1B\u4E0D\u80FD\u8BFB\u53D6\u7279\u5F81");
           throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
         }
@@ -585,7 +628,10 @@
         ensureActive("start-notifications");
         markStage("connected");
         this.diagnose("notifications-started");
-        if (!this.protocol) this.setPhase("detecting", "\u5DF2\u8FDE\u63A5\uFF0C\u7B49\u5F85\u8BBE\u5907\u62A5\u6587\u4EE5\u8FA8\u8BC6\u534F\u8BAE\u2026");
+        if (!this.protocol) {
+          this.diagnose("auth-gate", { stage: "await-protocol" });
+          this.setPhase("detecting", "\u5DF2\u8FDE\u63A5\uFF0C\u7B49\u5F85\u8BBE\u5907\u62A5\u6587\u4EE5\u8FA8\u8BC6\u534F\u8BAE\u2026");
+        }
         if (!this.protocol && requested) this.chooseProtocol(requested, "\u7528\u6237\u6307\u5B9A");
         else if (!this.protocol) this.sniffTimer = setTimeout(() => {
           if (epoch !== this.epoch || this.protocol) return;
@@ -593,6 +639,7 @@
           this.diagnose("protocol-sniff-expired", { notifications: this.rxNotifications, bytes: this.rxBytes, parsed: this.decodedFrames, cached: cached === 1 || cached === 2 }, "warn");
           if (cached === 1 || cached === 2) this.chooseProtocol(cached, "\u4E0A\u6B21\u6210\u529F\u7684\u534F\u8BAE\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4");
           else {
+            this.diagnose("auth-gate", { stage: "await-manual-protocol" });
             this.setPhase("password", "\u6CA1\u6709\u6536\u5230\u534F\u8BAE\u62A5\u6587\uFF1B\u8BF7\u624B\u52A8\u9009\u62E9\u65E7\u7248\u6216\u65B0\u7248\u534F\u8BAE\uFF0C\u518D\u8F93\u5165\u5BC6\u7801\u3002");
             this.emit({ type: "auth-needed", message: "\u8BF7\u9009\u534F\u8BAE\u5E76\u8F93\u5165\u4E94\u4F4D\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
           }
@@ -600,7 +647,7 @@
       } catch (error) {
         this.diagnose("gatt-connect-error", { stage, ...diagnosticError(error) }, "error");
         if (epoch === this.epoch) {
-          this.disconnect();
+          this.disconnect("connect-error");
           this.emit({ type: "notice", message: `\u8FDE\u63A5\u5931\u8D25\uFF1A${message(error)}` });
         }
         throw error;
@@ -617,6 +664,7 @@
       if (this.autoLoginTried) return;
       const saved = this.loadVault().devices[this.device.id];
       if (saved?.password && /^\d{5}$/.test(saved.password)) {
+        this.diagnose("auth-gate", { stage: "cached-password" });
         this.diagnose("auth-cached-available");
         this.autoLoginTried = true;
         void this.login(saved.password, true).catch((error) => {
@@ -626,6 +674,7 @@
           this.emit({ type: "auth-needed", message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
         });
       } else {
+        this.diagnose("auth-gate", { stage: "await-password-input" });
         this.setPhase("password", "\u8BF7\u8F93\u5165\u4E94\u4F4D\u84DD\u7259\u9A8C\u8BC1\u7801\uFF1B\u9996\u6B21\u901A\u8FC7\u540E\u53EF\u4FDD\u5B58\u5E76\u81EA\u52A8\u8F93\u5165\u3002");
         this.emit({ type: "auth-needed", message: "\u8BF7\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
       }
@@ -840,7 +889,7 @@
         throw error;
       }
     }
-    disconnect() {
+    disconnect(reason = "user") {
       this.epoch++;
       if (this.sniffTimer) clearTimeout(this.sniffTimer);
       this.sniffTimer = null;
@@ -848,7 +897,7 @@
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       const server = this.server;
-      if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected, stage: this.connectionStage });
+      if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page", connected: !!server?.connected, stage: this.connectionStage });
       this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
       if (this.notifier && this.listener) this.notifier.removeEventListener("characteristicvaluechanged", this.listener);
       this.device = null;
@@ -856,9 +905,14 @@
       this.writer = null;
       this.notifier = null;
       this.listener = null;
-      try {
-        if (server?.connected) server.disconnect();
-      } catch {
+      if (server?.connected) {
+        this.diagnose("gatt-disconnect-call", { reason, stage: this.connectionStage });
+        try {
+          server.disconnect();
+          this.diagnose("gatt-disconnect-result", { connected: server.connected });
+        } catch (error) {
+          this.diagnose("gatt-disconnect-error", diagnosticError(error), "warn");
+        }
       }
       this.protocol = null;
       this.latest = null;
@@ -911,7 +965,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "c8f5104", builtAt: "2026-09-27T04:49:45.518Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "73cfaad", builtAt: "2026-09-27T05:31:34.596Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1240,8 +1294,8 @@
     ...environment(),
     schema: 3,
     buildVersion: "0.1.0",
-    buildRevision: "c8f5104",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T04:49:45.518Z")
+    buildRevision: "73cfaad",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T05:31:34.596Z")
   });
   refreshDiagnostics(true);
   render();

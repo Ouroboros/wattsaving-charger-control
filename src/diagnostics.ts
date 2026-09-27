@@ -104,7 +104,7 @@ export class Diagnostics {
   exportText(environment: DiagnosticEnvironment): string {
     // 再清洗一次：将此前存储的记录与新加入的隐藏词一并脱敏。
     const entries = this.entries.map(entry => this.cleanEntry(entry));
-    return ["WattSaving diagnostics v3 (no passwords, device IDs or raw BLE frames)",
+    return ["WattSaving diagnostics v4 (no passwords, device IDs or raw BLE frames)",
       `environment: ${JSON.stringify(environment)}`,
       `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
       ...entries.map(entry => JSON.stringify(entry))].join("\n");

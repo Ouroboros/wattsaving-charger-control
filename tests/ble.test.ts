@@ -97,6 +97,54 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
 });
+test("FFE0/FFE5 返回短码特征时保持连接，提示输入验证码且授权前不写入", async () => {
+  for (const [notifyUuid, writeUuid] of [["ffe4", "ffe9"], ["0000ffe4", "0000ffe9"]]) {
+    (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+    const device = new FakeDevice("private-device-id");
+    Object.defineProperty(device.notifier, "uuid", { value: notifyUuid });
+    Object.defineProperty(device.writer, "uuid", { value: writeUuid });
+    device.gatt.getPrimaryService = async uuid => {
+      if (uuid.startsWith("0000ffe0")) return { getCharacteristics: async () => [device.notifier] as unknown as BleCharacteristic[] };
+      if (uuid.startsWith("0000ffe5")) return { getCharacteristics: async () => [device.writer] as unknown as BleCharacteristic[] };
+      throw new Error("service discovery rejected");
+    };
+    const events: string[] = [];
+    const log = new Diagnostics(null);
+    const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event.type), () => true,
+      (event, data, level) => log.add(event, data, level));
+    await client.chooseDevice();
+    await tick();
+    assert.equal(device.gatt.connected, true);
+    assert.equal(client.currentProtocol, 2);
+    assert.ok(events.includes("auth-needed"));
+    assert.equal(client.authorized, false);
+    assert.equal(device.writer.sent.length, 0);
+    assert.ok(log.recent.some(entry => entry.event === "service-query-start" && entry.data.service === "ff00"));
+    assert.ok(log.recent.some(entry => entry.event === "service-unavailable" && entry.data.service === "ff00"));
+    assert.ok(log.recent.some(entry => entry.event === "characteristics-query-start" && entry.data.service === "ffe0"));
+    assert.ok(log.recent.some(entry => entry.event === "characteristics-query-start" && entry.data.service === "ffe5"));
+    assert.ok(log.recent.some(entry => entry.event === "discovery-summary" && entry.data.notify === true && entry.data.write === true));
+    const discovered = log.recent.filter(entry => entry.event === "characteristic-discovered");
+    const selections = log.recent.filter(entry => entry.event === "characteristic-selection");
+    const form = notifyUuid.length === 4 ? "short16" : "short32";
+    assert.ok(discovered.some(entry => entry.data.uuid === "ffe4" && entry.data.uuidForm === form));
+    assert.ok(discovered.some(entry => entry.data.uuid === "ffe9" && entry.data.uuidForm === form));
+    assert.ok(selections.some(entry => entry.data.uuid === "ffe4" && entry.data.notifyUuidMatch === true && entry.data.notifyProperty === true && entry.data.selectedNotify === true));
+    assert.ok(selections.some(entry => entry.data.uuid === "ffe9" && entry.data.writeUuidMatch === true && entry.data.writeProperty === true && entry.data.selectedWrite === true));
+    assert.ok(log.recent.some(entry => entry.event === "auth-gate" && entry.data.stage === "await-password-input"));
+    assert.equal(log.recent.some(entry => entry.event === "gatt-connect-error" || entry.event === "disconnect" || entry.event === "auth-request" || entry.event === "tx-attempt"), false);
+    await client.login("12345", false);
+    assert.equal(client.authorized, true);
+    assert.ok(log.recent.some(entry => entry.event === "auth-request"));
+    const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+    assert.equal(output.includes("12345"), false);
+    assert.equal(output.includes(device.id), false);
+    client.disconnect();
+    assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "user" && entry.data.initiatedBy === "page" && entry.data.connected === true));
+    assert.ok(log.recent.some(entry => entry.event === "gatt-disconnect-call" && entry.data.reason === "user"));
+    assert.ok(log.recent.some(entry => entry.event === "gatt-disconnect-result" && entry.data.connected === false));
+  }
+});
 test("断线及重连时移除旧通知监听，避免累积回调", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("private-device-id");
@@ -245,7 +293,13 @@ test("特征不匹配时记录逐服务 UUID 短码和属性，自定义 UUID �
   assert.equal(found[2]?.writeWithoutResponse, true);
   assert.equal(found[2]?.writeResponseMethod, false);
   assert.ok(entries.some(entry => entry.event === "service-unavailable" && entry.data.service === "ff00" && entry.data.reason === "not-found"));
-  assert.ok(entries.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ffe5"));
+  assert.ok(entries.some(entry => entry.event === "discovery-missing" && entry.data.notify === false && entry.data.write === false));
+  const errorAt = entries.findIndex(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ffe5");
+  const disconnectAt = entries.findIndex(entry => entry.event === "disconnect" && entry.data.reason === "connect-error" && entry.data.initiatedBy === "page" && entry.data.connected === true);
+  const callAt = entries.findIndex(entry => entry.event === "gatt-disconnect-call" && entry.data.reason === "connect-error");
+  assert.ok(errorAt >= 0 && disconnectAt > errorAt && callAt > disconnectAt);
+  assert.equal(entries.some(entry => entry.event === "unexpected-disconnect"), false);
+  assert.ok(entries.some(entry => entry.event === "gatt-disconnect-result" && entry.data.connected === false));
   for (const secret of [device.id, device.name, customUuid, "@%PD-100"]) assert.equal(output.includes(secret), false);
 });
 test("选择器拒绝与通知启动失败均记录阶段及安全错误类别", async () => {
@@ -318,7 +372,9 @@ test("查询服务时断线会中止扫描，不再误报后续服务或特征�
   rejectService(new Error("private-device-id service error"));
   await assert.rejects(pending, /连接在服务发现期间已中止/);
   assert.equal(queries, 1);
-  assert.ok(log.recent.some(entry => entry.event === "unexpected-disconnect" && entry.data.stage === "service-ff00" && typeof entry.data.afterConnectedMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "unexpected-disconnect" && entry.data.stage === "service-ff00" && entry.data.connected === false && typeof entry.data.afterConnectedMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "gatt-event" && entry.data.initiatedBy === "gatt-event"));
+  assert.equal(log.recent.some(entry => entry.event === "gatt-disconnect-call"), false);
   assert.ok(log.recent.some(entry => entry.event === "discovery-interrupted" && entry.data.stage === "service-ff00" && entry.data.cause === "gatt-disconnected"));
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.reason === "connection-interrupted"));
   assert.equal(log.recent.some(entry => entry.event === "service-unavailable" || entry.event === "characteristics"), false);
