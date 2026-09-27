@@ -94,7 +94,10 @@
       </section>
       <section id="tabPanelExperiment" role="tabpanel" aria-labelledby="tabExperiment" style="margin-top:16px" hidden>
         <div class="panel"><h2>当前设备字段</h2><p class="sub" id="experimentIdentityStatus" role="status" aria-live="polite">等待当前设备 54 通知。</p></div>
-        <div class="panel"><h2>APP 独有手动查询</h2><p class="sub">VIN 列表：23 0A 25 [桩编码4字节] [枪号1字节] 66 [校验] → 75（字节 8 为结果码）。4G 信息：23 0A 44 [桩编码4字节] [枪号1字节] 66 [校验] → 94。桩编码与枪号自动从同一设备的有效 54 通知取得。</p>
+        <div class="panel"><h2>APP 独有手动查询</h2>
+          <p class="sub"><strong>VIN 列表</strong><br>请求：<code>23 0A 25 [桩编码4字节] [枪号1字节] 66 [校验]</code><br>回报：<code>75</code>（字节 8 为结果码）</p>
+          <p class="sub"><strong>4G 信息</strong><br>请求：<code>23 0A 44 [桩编码4字节] [枪号1字节] 66 [校验]</code><br>回报：<code>94</code></p>
+          <p class="sub">桩编码与枪号自动从同一设备的有效 54 通知取得。</p>
           <div class="actions"><button id="experimentQueryVin" class="secondary" type="button" disabled>查询 VIN 列表</button><button id="experimentQueryNetwork" class="secondary" type="button" disabled>查询 4G 信息</button></div>
           <p id="experimentQueryResult" class="sub" role="status" aria-live="polite">尚未发起 APP 查询。</p>
         </div>

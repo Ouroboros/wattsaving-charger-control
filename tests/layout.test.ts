@@ -30,6 +30,9 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   assert.doesNotMatch(experiment, /<div class="notice"|未经旧设备验证|副作用|无回报不能证明/);
   assert.match(experiment, /id="experimentQueryVin"/);
   assert.match(experiment, /id="experimentQueryNetwork"/);
+  assert.match(experiment, /<strong>VIN 列表<\/strong><br>请求：<code>23 0A 25 [^<]+<\/code><br>回报：<code>75<\/code>/);
+  assert.match(experiment, /<strong>4G 信息<\/strong><br>请求：<code>23 0A 44 [^<]+<\/code><br>回报：<code>94<\/code>/);
+  assert.match(experiment, /<\/p>\s*<p class="sub">桩编码与枪号自动从同一设备的有效 54 通知取得。<\/p>/);
   assert.doesNotMatch(experiment, /id="experimentPile"|id="experimentGun"|id="experimentAutoQuery"/);
   assert.doesNotMatch(charge, /id="localChargeHistory"|本网页充电记录|尚未与真实充电桩及 Bluefy 联调/);
   assert.match(connection, /id="liveChoose"/);

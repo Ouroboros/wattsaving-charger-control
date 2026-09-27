@@ -1586,7 +1586,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "4a50023", builtAt: "2026-09-27T19:26:14.130Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "f8f9874", builtAt: "2026-09-27T19:30:37.882Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var localStorageAccess;
@@ -2251,8 +2251,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "4a50023",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:26:14.130Z")
+    buildRevision: "f8f9874",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:30:37.882Z")
   });
   refreshDiagnostics(true);
   render();
