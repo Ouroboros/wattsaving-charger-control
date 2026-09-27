@@ -2,6 +2,7 @@ import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEve
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
 import { LocalHistory } from "./history";
+import { experimentalGearCommand } from "./experimental";
 import { showTab, tabIndexForKey } from "./tabs";
 
 declare const __BUILD_VERSION__: string;
@@ -33,6 +34,8 @@ let statusAt = 0;
 let staleLoggedFor = 0;
 let reservationResult = "";
 let adminMessage = "";
+let experimentResult = "";
+let experimentReport: { deviceId: string; gear: number; powerTenths: number; at: number } | null = null;
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
 let confirmedReservation: { deviceId: string; startsAt: number; source: "session" | "restored" } | null = null;
@@ -177,11 +180,21 @@ function failure(action: string, error: unknown): void {
 function handleEvent(event: ChargerEvent): void {
   if (event.type === "phase") {
     phase = event.phase;
-    if (phase === "offline" || phase === "connecting") { reservationResult = ""; adminMessage = ""; }
+    if (phase === "offline" || phase === "connecting") {
+      reservationResult = ""; adminMessage = ""; experimentResult = ""; experimentReport = null;
+      el<HTMLInputElement>("experimentPile").value = "";
+      el<HTMLInputElement>("experimentGun").value = "";
+    }
     diagnostics.add("phase", { phase }); record(event.message);
   }
   if (event.type === "notice") { record(event.message); if (event.severity === "error") showErrorModal(event.message); }
   if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
+  if (event.type === "experimental-power" && client?.authorized && client.currentDevice?.id) {
+    experimentReport = { deviceId: client.currentDevice.id, gear: event.gear, powerTenths: event.powerTenths, at: Date.now() };
+  }
+  if (event.type === "experimental-ack") {
+    experimentResult = event.accepted ? `设备 82/01 已接受档位 ${event.gear}；等待 54 状态确认。` : `设备 82 回执未接受档位 ${event.gear}。`;
+  }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
@@ -238,6 +251,17 @@ function render(): void {
   text("liveElectrical", status ? `故障状态：${faultDescription(status)}（${status.power || "未报告"}）` : "无设备数据");
   el<HTMLButtonElement>("liveFaultDetail").disabled = !status;
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
+  const report = client?.authorized && experimentReport?.deviceId === device?.id ? experimentReport : null;
+  const reportFresh = !!report && Date.now() - report.at < 20000;
+  text("experimentReportedGear", reportFresh ? String(report!.gear) : "--");
+  text("experimentReportedPower", reportFresh ? String(report!.powerTenths / 10) : "--");
+  text("experimentReportAge", !report ? "尚未收到有效的二进制 54 通知。" : reportFresh ?
+    `收到设备 54 通知（${new Date(report.at).toLocaleTimeString("zh-CN")}）；仅为被动读取。` : "上次 54 通知已过期；当前功率和档位未知。");
+  text("experimentResult", experimentResult || "尚未执行实验操作。");
+  const pile = el<HTMLInputElement>("experimentPile").value;
+  const gun = el<HTMLInputElement>("experimentGun").value;
+  el<HTMLButtonElement>("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending ||
+    !/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun);
   const loginProgress = el("liveLoginProgress");
   loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
   if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "正在自动登录，等待设备确认…" : "正在验证验证码，等待设备确认…");
@@ -330,6 +354,25 @@ el("liveRefresh").addEventListener("click", () => {
     diagnostics.add("ui-cancelled", { action: "clock-sync" }); refreshDiagnostics(); return;
   }
   void client.refresh().catch(error => failure("同步状态", error));
+});
+for (const id of ["experimentPile", "experimentGun"]) el(id).addEventListener("input", render);
+el("experimentSend").addEventListener("click", () => {
+  if (!client || busy || !client.authorized || !client.currentStatus || Date.now() - statusAt >= 20000) return;
+  const pile = el<HTMLInputElement>("experimentPile").value;
+  const gun = el<HTMLInputElement>("experimentGun").value;
+  const gear = Number(el<HTMLSelectElement>("experimentGear").value);
+  let packet: Uint8Array;
+  try { packet = experimentalGearCommand(pile, gun, gear); }
+  catch (error) { reportOperationError(errorMessage(error)); return; }
+  const hex = [...packet].map(byte => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+  if (!window.confirm(`实验命令，旧设备未验证。档位 ${gear} 与 22／7／11／16 kW 的对应关系未知。\n请确认桩编码和枪号属于当前设备，且当前可现场核对。\n将发送原始字节：${hex}\n仅 82/01 加 54 状态匹配才显示双重确认；无自动重试。继续吗？`)) return;
+  busy = true; experimentResult = `已请求档位 ${gear}，等待设备 82 回执及 54 状态…`; render();
+  void client.experimentalGear(pile, gun, gear).then(() => {
+    experimentResult = `设备 82/01 已接受、54 已报告档位 ${gear}；实际输出功率须现场核对。`;
+  }, error => {
+    experimentResult = `档位 ${gear} 未得到双重确认：${errorMessage(error)}`;
+    failure("实验档位", error);
+  }).finally(() => { busy = false; render(); });
 });
 async function control(action: ControlAction): Promise<void> {
   if (!client) return;
@@ -496,6 +539,7 @@ el("clearDiagnostics").addEventListener("click", () => {
 const tabPairs = ([
   ["tabConnection", "tabPanelConnection"],
   ["tabCharge", "tabPanelCharge"],
+  ["tabExperiment", "tabPanelExperiment"],
   ["tabFeedback", "tabPanelFeedback"],
   ["tabAbout", "tabPanelAbout"]
 ] as const).map(([tabId, panelId]) => ({ tab: el<HTMLButtonElement>(tabId), panel: el(panelId) }));
@@ -526,13 +570,16 @@ document.addEventListener("visibilitychange", () => {
   refreshDiagnostics(); updateReservationCountdown();
 });
 window.addEventListener("pagehide", event => {
+  el<HTMLInputElement>("experimentPile").value = "";
+  el<HTMLInputElement>("experimentGun").value = "";
+  experimentReport = null;
   diagnostics.add("page-hide", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
 });
 window.addEventListener("pageshow", event => {
   diagnostics.add("page-show", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
-  refreshDiagnostics();
+  refreshDiagnostics(); render();
 });
 if (client?.rememberedName && window.isSecureContext) {
   diagnostics.add("restore-auto-start", { remembered: true }); refreshDiagnostics();

@@ -1,5 +1,6 @@
 import { adminCommand, command, FrameDecoder, reservationCommand, syncClock, type AdminAction, type ControlAction, type DeviceStatus, type Frame, type Reservation, type ReservationAction, type Version } from "./protocol";
 import { diagnosticError, type DiagnosticLevel, type DiagnosticValue } from "./diagnostics";
+import { ExperimentalDecoder, experimentalGearCommand, type ExperimentalFrame } from "./experimental";
 
 // Web Bluetooth 在部分 TypeScript DOM 版本中没有类型定义；只声明本项目使用到的 API。
 export interface BleCharacteristic extends EventTarget {
@@ -31,6 +32,8 @@ export type ChargerEvent =
   | { type: "notice"; message: string; severity?: "error" }
   | { type: "protocol"; version: Version; source: string }
   | { type: "status"; status: DeviceStatus }
+  | { type: "experimental-power"; gear: number; powerTenths: number }
+  | { type: "experimental-ack"; gear: number; accepted: boolean }
   | { type: "reservation"; action: ReservationAction; message: string }
   | { type: "auth-needed"; message: string };
 const KEY = "wattsaving-ble-devices-v1";
@@ -111,6 +114,7 @@ export class ChargerClient {
   private pairingNotifier: BleCharacteristic | null = null;
   private listener: ((event: Event) => void) | null = null;
   private decoder = new FrameDecoder();
+  private experimentalDecoder = new ExperimentalDecoder();
   private rxNotifications = 0;
   private rxBytes = 0;
   private decodedFrames = 0;
@@ -136,6 +140,7 @@ export class ChargerClient {
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingReservation: { action: ReservationAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingAdmin: { action: AdminAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingGear: { gear: number; ack: boolean; observed: boolean; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private adminVerified = false;
   private reservationAccepted: boolean | null = null;
   private fallbackVault: Vault = { lastId: "", devices: {} };
@@ -153,6 +158,7 @@ export class ChargerClient {
   get automaticLoginPending(): boolean { return this.autoLoginInProgress && this.phase === "authenticating"; }
   get reservationPending(): boolean { return !!this.pendingReservation; }
   get adminPending(): boolean { return !!this.pendingAdmin; }
+  get experimentalPending(): boolean { return !!this.pendingGear; }
   get administratorAuthorized(): boolean { return this.authorized && this.adminVerified; }
   get pairingAvailable(): boolean { return this.protocol === 2 && !!this.pairingNotifier; }
   get manualBluetoothLogin(): boolean { try { return localStorage.getItem(AUTH_MODE_KEY) === "1"; } catch { return false; } }
@@ -488,14 +494,40 @@ export class ChargerClient {
   }
   async refresh(): Promise<void> {
     if (!this.authorized || !this.protocol) throw new Error("请先通过设备授权");
-    if (this.pendingReservation || this.pendingAdmin) throw new Error("正在等待设备管理或预约回执，请勿同时发送同步指令");
+    if (this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("正在等待设备操作回执，请勿同时发送同步指令");
     // 旧应用使用同步设备时钟的帧触发状态更新；它不是无副作用的读取操作。
     await this.write(syncClock(this.protocol), "clock-sync");
     this.emit({ type: "notice", message: "已发送设备时钟同步帧，等待状态通知。" });
   }
+  experimentalGear(pile: string, gun: string, gear: number): Promise<void> {
+    if (!this.authorized || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("须先取得近期设备授权状态；不能凭旧状态尝试档位");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条设备操作尚未确认");
+    const bytes = experimentalGearCommand(pile, gun, gear);
+    this.diagnose("experimental-gear-request", { gear, bytes: bytes.length }); // 不记录桩编码、枪号或报文原文。
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => this.rejectExperimental(new Error("未同时收到 82/01 回执和 54 档位状态；结果未知，请现场核对，勿直接重试"), "timeout"), 12000);
+      this.pendingGear = { gear, ack: false, observed: false, resolve, reject, timer };
+      void this.writeBytes(bytes, "experimental-gear").catch(error =>
+        this.rejectExperimental(new Error(`发送实验性档位报文失败：${message(error)}`), "write-error"));
+    });
+  }
+  private rejectExperimental(error: Error, reason: string): void {
+    const pending = this.pendingGear;
+    if (!pending) return;
+    this.pendingGear = null; clearTimeout(pending.timer);
+    this.diagnose("experimental-gear-unconfirmed", { gear: pending.gear, reason, replyAccepted: pending.ack, statusMatched: pending.observed }, "warn");
+    pending.reject(error);
+  }
+  private confirmExperimental(): void {
+    const pending = this.pendingGear;
+    if (!pending || !pending.ack || !pending.observed) return;
+    this.pendingGear = null; clearTimeout(pending.timer);
+    this.diagnose("experimental-gear-confirmed", { gear: pending.gear, evidence: "82-ack-and-54-status" });
+    pending.resolve();
+  }
   control(action: ControlAction): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条指令尚未确认");
     const s = this.latest;
     if (action === "start" && (s.state !== "2" || s.gunFlag === "1" || s.selfStartFlag === "2" || s.mode === "3")) throw new Error("设备当前不满足启动条件：需就绪、插枪、无预约或即插即充冲突");
     if (action === "stop" && s.state !== "4") throw new Error("只有充电中才能停止");
@@ -511,7 +543,7 @@ export class ChargerClient {
   admin(action: AdminAction, password?: string): Promise<void> {
     if (!this.authorized || !this.protocol || !this.device) throw new Error("请先连接并通过设备蓝牙授权");
     if (action !== "admin-auth" && !this.adminVerified) throw new Error("请先使用独立管理员验证码取得设备确认");
-    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin) throw new Error("上一条设备操作尚未确认");
+    if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.pendingGear) throw new Error("上一条设备操作尚未确认");
     if (action !== "admin-auth" && (!this.latest || Date.now() - this.latestAt > 20000)) throw new Error("设备状态已过期；管理操作需要最新设备状态");
     const status = this.latest;
     if (action === "plug-on" && (status?.mode === "3" || status?.mode === "5")) throw new Error("请先取消预约或无感充电模式");
@@ -536,7 +568,7 @@ export class ChargerClient {
   cancelReservation(): Promise<void> { return this.reserve("cancel"); }
   private reserve(action: ReservationAction, reservation?: Reservation): Promise<void> {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
-    if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin) throw new Error("上一条指令尚未确认");
+    if (this.pendingControl || this.pendingReservation || this.pendingAuth || this.pendingAdmin || this.pendingGear) throw new Error("上一条指令尚未确认");
     const status = this.latest;
     if (action === "submit") {
       const blocked = reservationBlockReason(status);
@@ -575,14 +607,33 @@ export class ChargerClient {
     pending.resolve();
   }
   private onBytes(view: DataView): void {
-    const frames = this.decoder.feed(decodeAscii(view));
-    this.rxNotifications++; this.rxBytes += view.byteLength; this.decodedFrames += frames.length;
+    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    const experimental = this.experimentalDecoder.feed(bytes);
+    const text = new DataView(experimental.text.buffer, experimental.text.byteOffset, experimental.text.byteLength);
+    const frames = this.decoder.feed(decodeAscii(text));
+    this.rxNotifications++; this.rxBytes += view.byteLength; this.decodedFrames += frames.length + experimental.frames.length;
     // 分片与未知格式也要可见；连续通知只记录前六次及 2 的幂，避免冲掉发现阶段的日志。
     if (frames.some(frame => frame.type !== "status" && frame.type !== "unknown") || this.rxNotifications <= 6 || !(this.rxNotifications & (this.rxNotifications - 1))) {
       this.diagnose("rx-notification", { bytes: view.byteLength, parsed: frames.length,
         notifications: this.rxNotifications, totalBytes: this.rxBytes, totalParsed: this.decodedFrames });
     }
     for (const frame of frames) this.onFrame(frame);
+    for (const frame of experimental.frames) this.onExperimentalFrame(frame);
+  }
+  private onExperimentalFrame(frame: ExperimentalFrame): void {
+    if (!this.authorized) { this.diagnose("experimental-reply-ignored", { reason: "not-authorized" }); return; }
+    if (frame.type === "power-report") {
+      this.emit({ type: "experimental-power", gear: frame.gear, powerTenths: frame.powerTenths });
+      const pending = this.pendingGear;
+      if (pending && frame.gear === pending.gear) { pending.observed = true; this.confirmExperimental(); }
+      return;
+    }
+    const pending = this.pendingGear;
+    if (!pending) { this.diagnose("experimental-reply-ignored", { reason: "no-pending" }); return; }
+    this.emit({ type: "experimental-ack", gear: pending.gear, accepted: frame.accepted });
+    if (!frame.accepted) { this.rejectExperimental(new Error("设备 82 回执未返回 01；拒绝或结果未知"), "rejected"); return; }
+    pending.ack = true;
+    this.confirmExperimental();
   }
   private onFrame(frame: Frame): void {
     if (frame.type === "unknown") {
@@ -679,11 +730,13 @@ export class ChargerClient {
       this.diagnose("control-ack-ignored", { action: frame.action, reason: this.pendingControl ? "action-mismatch" : "no-pending" }, "warn");
     }
   }
-  private async write(text: string, action: "auth" | "clock-sync" | ControlAction | AdminAction | "reservation-submit" | "reservation-cancel"): Promise<void> {
+  private write(text: string, action: "auth" | "clock-sync" | ControlAction | AdminAction | "reservation-submit" | "reservation-cancel"): Promise<void> {
+    return this.writeBytes(encodeAscii(text), action);
+  }
+  private async writeBytes(bytes: Uint8Array<ArrayBuffer>, action: string): Promise<void> {
     if (!this.enabled()) throw new Error("真机控制模式已关闭，不发送蓝牙指令");
     const writer = this.writer;
     if (!writer || !this.server?.connected) throw new Error("蓝牙连接已断开");
-    const bytes = encodeAscii(text);
     this.diagnose("tx-attempt", { action, bytes: bytes.length });
     let method = "none";
     try {
@@ -703,7 +756,7 @@ export class ChargerClient {
       afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null,
       stageMs: this.stageAt ? Math.max(0, Date.now() - this.stageAt) : null,
       ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
-      pendingReservation: !!this.pendingReservation, pendingAdmin: !!this.pendingAdmin, notifications: this.rxNotifications }, "warn");
+      pendingReservation: !!this.pendingReservation, pendingAdmin: !!this.pendingAdmin, pendingGear: !!this.pendingGear, notifications: this.rxNotifications }, "warn");
     this.diagnose("disconnect-rx-summary", { attempt: this.attempt, notifications: this.rxNotifications,
       totalBytes: this.rxBytes, parsed: this.decodedFrames, unknown: this.unknownFrames, statuses: this.statusFrames });
     const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin);
@@ -725,6 +778,7 @@ export class ChargerClient {
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"), "disconnect");
     this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"), "disconnect");
     this.rejectAdmin(new Error("蓝牙连接已断开；管理操作结果未知"), "disconnect");
+    this.rejectExperimental(new Error("蓝牙连接已断开；档位操作结果未知"), "disconnect");
     this.adminVerified = false;
     const server = this.server;
     if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page",
@@ -738,7 +792,7 @@ export class ChargerClient {
       catch (error) { this.diagnose("gatt-disconnect-error", diagnosticError(error), "warn"); }
     }
     this.protocol = null; this.latest = null; this.latestAt = 0;
-    this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset();
+    this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset(); this.experimentalDecoder.reset();
     this.rxNotifications = 0; this.rxBytes = 0; this.decodedFrames = 0; this.unknownFrames = 0;
     this.statusFrames = 0; this.lastStatusSignature = "";
     this.connectionStage = "offline"; this.stageAt = 0; this.connectedAt = 0;

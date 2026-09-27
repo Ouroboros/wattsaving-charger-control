@@ -10,13 +10,13 @@
     :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .build-info { overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
     main { position:fixed; inset:0; width:100%; max-width:820px; min-height:0; margin:0 auto; padding:0 20px; display:flex; flex-direction:column; }
     .live { flex:1; min-height:0; width:100%; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--line); border-radius:20px 20px 0 0; box-shadow:0 12px 36px #18312a0a; overflow:hidden; }
-    .tabs { flex:none; width:100%; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; padding:8px 16px calc(8px + env(safe-area-inset-bottom)); background:#f9fbf8; border-top:1px solid var(--line); box-shadow:0 -4px 12px #18312a12; }
+    .tabs { flex:none; width:100%; display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:4px; padding:8px 16px calc(8px + env(safe-area-inset-bottom)); background:#f9fbf8; border-top:1px solid var(--line); box-shadow:0 -4px 12px #18312a12; }
     .tab { min-width:0; padding:10px 3px; border:1px solid transparent; border-bottom:3px solid transparent; border-radius:10px 10px 0 0; background:transparent; color:var(--muted); font-weight:600; text-align:center; font-size:.88rem; white-space:nowrap; }
     .tab[aria-selected="true"] { color:var(--accent); background:#fff; border-color:var(--line); border-bottom-color:var(--accent); }
     .connection-dot { display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; background:#89958e; vertical-align:1px; } .connection-dot.connected { background:#12a26e; box-shadow:0 0 0 2px #d9f2e4; }
     .screen { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; padding:22px 24px 20px; } [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; min-width:0; max-width:100%; }
     .panel h2 { font-size:1rem; margin:0 0 10px; } .panel p { margin:5px 0 12px; } .panel .sub { color:var(--muted); font-size:.86rem; } .panel label { display:block; margin:12px 0 5px; font-weight:600; } .panel label.check { display:flex; gap:7px; align-items:center; font-weight:400; font-size:.85rem; }
-    select,input[type=password],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
+    select,input[type=password],input[type=text],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
     .status { display:inline-flex; align-items:center; gap:7px; font-size:.84rem; padding:5px 11px; border-radius:99px; background:#eff0ed; }
     .status:before { content:""; width:8px; height:8px; background:#81908c; border-radius:100%; } .status.good { color:#0d694e; background:#e1f4e9; } .status.good:before { background:#12a26e; }
     .hero { background:linear-gradient(138deg,#163d36,#285b44); color:white; padding:22px; border-radius:16px; margin:0 0 16px; } .hero h2 { font-size:1.45rem; margin:13px 0 8px; } .hero p { color:#d6e9d9; font-size:.86rem; margin:0; }
@@ -40,6 +40,7 @@
     .reserve-countdown span,.reserve-countdown small { display:block; margin:4px 0 0; } .reserve-countdown small { color:#45645a; }
     .history-list { margin:10px 0; padding-left:21px; } .history-list li { padding:9px 0; border-bottom:1px solid var(--line); white-space:pre-line; overflow-wrap:anywhere; font-size:.85rem; line-height:1.5; }
     @media(max-width:760px) { main { padding:0 12px; } .screen { padding-left:16px; padding-right:16px; } .tabs { padding:8px 8px calc(8px + env(safe-area-inset-bottom)); gap:2px; } .tab { font-size:.82rem; padding:10px 2px; } .metrics { gap:5px; } .metric { padding:8px; } }
+    .experiment-values { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; } .experiment-values .metric { background:var(--soft); border-color:var(--line); }
   </style>
 </head>
 <body>
@@ -94,6 +95,20 @@
       <div class="panel"><h2>本网页充电记录</h2><p class="sub">只记录此网页观察到的设备状态；不是设备订单，无法读取微信小程序里的历史。离线期间无法确定准确起止时间。</p><div id="localChargeHistory" aria-live="off">暂无本网页记录</div></div>
       <div class="panel"><h2>本网页预约记录</h2><p class="sub">仅保存设备已确认的本网页预约操作；其他客户端修改、设备离线执行结果无法从本地记录推定。</p><div id="localReserveHistory" aria-live="off">暂无本网页记录</div><p class="footer" id="localHistoryHint">仅存储在此浏览器的网站数据中。</p><button id="localHistoryClear" class="secondary full" type="button">清除此网页的充电和预约记录</button></div>
       </section>
+      <section id="tabPanelExperiment" role="tabpanel" aria-labelledby="tabExperiment" style="margin-top:16px" hidden>
+        <div class="notice">实验功能，未经旧设备验证。APP 显示过 22／7／11／16 kW，但无法确定它们分别对应档位 0～3；不要按 kW 选档。仅连接、蓝牙授权和近期状态均具备时允许手动操作。</div>
+        <div class="panel" style="margin-top:16px"><h2>被动功率与档位状态</h2><p class="sub">只接收 APP 使用的 0x23／54 二进制状态通知；不会发送“查询充电模式”或定时查询指令。若设备只发文本状态，这里会一直显示未知；未收到 54 不能证明旧固件不支持。</p>
+          <div class="experiment-values"><div class="metric"><strong id="experimentReportedGear">--</strong><span>设备上报档位（0～3；kW 对应未知）</span></div><div class="metric"><strong id="experimentReportedPower">--</strong><span>设备上报充电功率（APP 原值÷10；单位未核实）</span></div></div>
+          <p class="sub" id="experimentReportAge" role="status" aria-live="polite">尚未收到有效的二进制 54 通知。</p>
+        </div>
+        <div class="panel"><h2>手动实验：功率档位</h2><p class="sub">APP 的 BLE 帧为 23 0B 32 [四字节桩编码] [一字节枪号] [档位序号] 66 [校验]。桩编码和枪号须从同一设备的可信报文取得；不等于 Web Bluetooth 设备 ID。不保存输入，也不写入诊断日志。</p>
+          <label for="experimentPile">桩编码（8 位十六进制；不保存）</label><input id="experimentPile" type="text" maxlength="8" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="从同一设备的 APP 实包取得">
+          <label for="experimentGun">枪号（2 位十六进制；不保存）</label><input id="experimentGun" type="text" maxlength="2" inputmode="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="从同一设备的 APP 实包取得">
+          <label for="experimentGear">档位序号（不代表固定 kW）</label><select id="experimentGear"><option value="0">档位 0</option><option value="1">档位 1</option><option value="2">档位 2</option><option value="3">档位 3</option></select>
+          <button id="experimentSend" class="danger full" type="button" disabled>核对报文并手动试验</button>
+          <p id="experimentResult" class="sub" role="status" aria-live="polite">尚未执行实验操作。</p><p class="footer">写入成功 ≠ 设备接受；82/01 回执 ≠ 档位已变化。仅 82/01 与后续 54 档位一致时显示“双重确认”，实际输出功率仍须在设备旁核对。超时不自动重试。</p>
+        </div>
+      </section>
       <section id="tabPanelFeedback" role="tabpanel" aria-labelledby="tabFeedback" style="margin-top:16px" hidden>
       <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="log" aria-live="off" aria-label="设备反馈，最近一百条，可滚动">暂无设备反馈</div><p class="footer">本页保留最近 100 条，相邻同文案合并为 +N；重复状态通知最多每 30 秒重绘一次，状态本身仍随设备通知更新。</p></div>
       <div class="panel"><h2>诊断日志</h2><p class="sub">仅保存在此浏览器的网站数据中，最多保留最近 160 条。导出前仍请自行检查内容；不会采集原始蓝牙报文、验证码或设备 ID。</p>
@@ -109,10 +124,11 @@
     <div class="tabs" id="liveTabs" role="tablist" aria-label="充电桩功能">
       <button class="tab" id="tabConnection" role="tab" aria-controls="tabPanelConnection" aria-selected="true" tabindex="0" type="button"><span class="connection-dot" id="livePhase" role="img" aria-label="未连接" title="未连接"></span>连接</button>
       <button class="tab" id="tabCharge" role="tab" aria-controls="tabPanelCharge" aria-selected="false" tabindex="-1" type="button">充电</button>
+      <button class="tab" id="tabExperiment" role="tab" aria-label="实验性功率档位" aria-controls="tabPanelExperiment" aria-selected="false" tabindex="-1" type="button">实验</button>
       <button class="tab" id="tabFeedback" role="tab" aria-label="反馈与诊断" aria-controls="tabPanelFeedback" aria-selected="false" tabindex="-1" type="button">反馈</button>
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=tab-shell-history-admin-v1"></script>
+  <script defer src="./app.js?v=experimental-gear-v1"></script>
 </body>
 </html>

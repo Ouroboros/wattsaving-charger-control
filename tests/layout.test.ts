@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("四个标签占据容器底行、内容区独立滚动，充电与预约同页", () => {
+test("五个标签占据容器底行、内容区独立滚动，实验功能独立", () => {
   const html = readFileSync("index.html", "utf8");
   assert.match(html, /id="liveTabs" role="tablist"/);
   for (const [tab, panel] of [
     ["tabConnection", "tabPanelConnection"], ["tabCharge", "tabPanelCharge"],
-    ["tabFeedback", "tabPanelFeedback"], ["tabAbout", "tabPanelAbout"]
+    ["tabExperiment", "tabPanelExperiment"], ["tabFeedback", "tabPanelFeedback"], ["tabAbout", "tabPanelAbout"]
   ]) {
     assert.match(html, new RegExp(`id="${tab}"[^>]*aria-controls="${panel}"`));
     assert.match(html, new RegExp(`id="${panel}"[^>]*aria-labelledby="${tab}"`));
@@ -20,10 +20,15 @@ test("四个标签占据容器底行、内容区独立滚动，充电与预约�
   assert.ok(html.indexOf('id="liveTabContent"') < html.indexOf('id="tabPanelConnection"'));
   assert.ok(html.indexOf('id="liveTabs"') > html.indexOf('id="tabPanelAbout"'));
   assert.match(html, /id="tabPanelCharge"[^>]*hidden>/);
+  assert.match(html, /id="tabPanelExperiment"[^>]*hidden>/);
   assert.match(html, /id="tabPanelFeedback"[^>]*hidden>/);
   assert.match(html, /id="tabPanelAbout"[^>]*hidden>/);
   const connection = html.slice(html.indexOf('<section id="tabPanelConnection"'), html.indexOf('<section id="tabPanelCharge"'));
-  const charge = html.slice(html.indexOf('<section id="tabPanelCharge"'), html.indexOf('<section id="tabPanelFeedback"'));
+  const charge = html.slice(html.indexOf('<section id="tabPanelCharge"'), html.indexOf('<section id="tabPanelExperiment"'));
+  const experiment = html.slice(html.indexOf('<section id="tabPanelExperiment"'), html.indexOf('<section id="tabPanelFeedback"'));
+  assert.match(experiment, /id="experimentSend"/);
+  assert.match(experiment, /只接收 APP 使用的 0x23／54/);
+  assert.doesNotMatch(experiment, /id="experimentQuery"|id="experimentAutoQuery"/);
   assert.match(connection, /id="liveChoose"/);
   assert.match(connection, /id="liveForgetDevice"/);
   assert.doesNotMatch(connection, /id="liveStart"|id="reserveSubmit"/);

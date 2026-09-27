@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer, type ChargerEvent } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
+import { experimentalGearCommand } from "../src/experimental";
 import { nextMidnight } from "../src/protocol";
 
 class MemoryStorage {
@@ -21,9 +22,9 @@ class FakeNotifier extends EventTarget {
     queueMicrotask(() => this.push(stateFrame("2")));
     return this as unknown as BleCharacteristic;
   }
-  push(frame: string): void {
-    const bytes = Uint8Array.from([...frame], ch => ch.charCodeAt(0));
-    this.value = new DataView(bytes.buffer);
+  push(frame: string): void { this.pushBytes(Uint8Array.from([...frame], ch => ch.charCodeAt(0))); }
+  pushBytes(bytes: Uint8Array): void {
+    this.value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     this.dispatchEvent(new Event("characteristicvaluechanged"));
   }
 }
@@ -619,7 +620,59 @@ test("重复未识别通知仅保留计数摘要，不冲掉连接与授权诊�
   for (let i = 0; i < 128; i++) device.notifier.push("@%DP-999-0-181-1-@");
   const unknown = log.recent.filter(entry => entry.event === "rx-unknown-summary");
   assert.ok(unknown.length < 15);
-  assert.ok(unknown.some(entry => entry.data.count === 128));
+  assert.ok(log.recent.some(entry => entry.data.count === 128));
   assert.ok(log.recent.some(entry => entry.event === "rx-notification" && entry.data.notifications === 128));
   client.disconnect();
+});
+function binaryReport(gear: number): Uint8Array {
+  const result = new Uint8Array(55);
+  result.set([0x23, 55, 0x54]); result[52] = gear; result[53] = 0x66;
+  result[54] = result.slice(0, 54).reduce((sum, byte) => sum + byte, 0) & 0xff;
+  return result;
+}
+function binaryGearReply(code: number): Uint8Array {
+  const result = Uint8Array.from([0x23, 11, 0x82, 0, 0, 0, 0, 0, code, 0x66, 0]);
+  result[10] = result.slice(0, 10).reduce((sum, byte) => sum + byte, 0) & 0xff;
+  return result;
+}
+test("实验档位须已授权且状态新鲜；82/01 与后续 54 均出现才确认，原始字段不入日志", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-experiment-device");
+  const events: ChargerEvent[] = [];
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event), () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  assert.throws(() => client.experimentalGear("11223344", "05", 2), /授权状态/);
+  await client.login("12345", false); await tick();
+  device.notifier.pushBytes(binaryReport(1));
+  assert.ok(events.some(event => event.type === "experimental-power" && event.gear === 1));
+  const write = client.experimentalGear("11223344", "05", 2);
+  assert.equal(client.experimentalPending, true);
+  assert.equal(device.writer.sent.at(-1), String.fromCharCode(...experimentalGearCommand("11223344", "05", 2)));
+  await assert.rejects(client.refresh(), /等待设备操作回执/);
+  device.notifier.pushBytes(binaryGearReply(1));
+  assert.equal(client.experimentalPending, true);
+  device.notifier.pushBytes(binaryReport(1)); // 其他档位不能误判。
+  assert.equal(client.experimentalPending, true);
+  device.notifier.pushBytes(binaryReport(2));
+  await write;
+  assert.equal(client.experimentalPending, false);
+  assert.ok(events.some(event => event.type === "experimental-ack" && event.accepted));
+  const exported = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of ["11223344", "private-experiment-device", "23 0B 32"]) assert.equal(exported.includes(secret), false);
+  client.disconnect();
+});
+test("实验档位遇设备拒绝或断线不报成功，也不自动重试", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-experiment-device");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", false); await tick();
+  const denied = client.experimentalGear("00000000", "00", 0);
+  device.notifier.pushBytes(binaryGearReply(0));
+  await assert.rejects(denied, /拒绝|结果未知/);
+  const pending = client.experimentalGear("00000000", "00", 0);
+  client.disconnect();
+  await assert.rejects(pending, /结果未知/);
+  assert.equal(client.experimentalPending, false);
 });
