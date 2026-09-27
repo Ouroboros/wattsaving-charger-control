@@ -159,6 +159,14 @@
   var SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
   var NOTIFY = /* @__PURE__ */ new Set([UUID("ff01"), UUID("ffe4")]);
   var WRITE = /* @__PURE__ */ new Set([UUID("ff02"), UUID("ffe9")]);
+  function diagnosticUuid(value) {
+    if (typeof value !== "string") return "missing";
+    const id = value.toLowerCase();
+    if (/^[0-9a-f]{4}$/.test(id)) return id;
+    const base = /^([0-9a-f]{8})-0000-1000-8000-00805f9b34fb$/.exec(id);
+    if (base) return base[1].startsWith("0000") ? base[1].slice(4) : base[1];
+    return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) ? "custom128" : "unexpected-format";
+  }
   function message(error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -245,8 +253,20 @@
       try {
         localStorage.setItem(KEY, JSON.stringify(vault));
       } catch {
-        this.emit({ type: "notice", message: "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u5B58\u50A8\uFF1B\u672C\u6B21\u5BC6\u7801\u4E0D\u4F1A\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u4FDD\u7559\u3002" });
+        this.emit({ type: "notice", message: "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u5B58\u50A8\uFF1B\u672C\u6B21\u8BBE\u5907\u548C\u5BC6\u7801\u4E0D\u4F1A\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u4FDD\u7559\u3002" });
       }
+    }
+    rememberConnectedDevice(device) {
+      if (!device.id) {
+        this.diagnose("device-remember-skipped", { reason: "missing-id" }, "warn");
+        return;
+      }
+      const vault = this.loadVault();
+      const previous = vault.devices[device.id];
+      vault.lastId = device.id;
+      vault.devices[device.id] = { ...previous, name: device.name || previous?.name || "\u672A\u547D\u540D\u8BBE\u5907" };
+      this.storeVault(vault);
+      this.diagnose("device-remembered", { known: !!previous });
     }
     forgetPassword() {
       const id = this.device?.id ?? this.loadVault().lastId;
@@ -308,6 +328,7 @@
         }
         this.server = server;
         this.diagnose("gatt-connected");
+        this.rememberConnectedDevice(device);
         device.addEventListener("gattserverdisconnected", this.onDisconnected);
         let notifier = null, writer = null;
         for (const uuid of SERVICES) {
@@ -318,8 +339,28 @@
             this.diagnose("service-unavailable", { service: uuid.slice(4, 8) });
             continue;
           }
-          this.diagnose("service-found", { service: uuid.slice(4, 8) });
-          for (const characteristic of await service.getCharacteristics()) {
+          const serviceCode = uuid.slice(4, 8);
+          this.diagnose("service-found", { service: serviceCode });
+          let characteristics;
+          try {
+            characteristics = await service.getCharacteristics();
+          } catch (error) {
+            this.diagnose("characteristics-error", { service: serviceCode, kind: error instanceof Error ? error.name : "unknown" }, "warn");
+            throw error;
+          }
+          this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
+          for (const [index, characteristic] of characteristics.entries()) {
+            const properties = characteristic.properties;
+            this.diagnose("characteristic-discovered", {
+              service: serviceCode,
+              index,
+              uuid: diagnosticUuid(characteristic.uuid),
+              propertiesAvailable: !!properties,
+              notify: !!properties?.notify,
+              indicate: !!properties?.indicate,
+              write: !!properties?.write,
+              writeWithoutResponse: !!properties?.writeWithoutResponse
+            });
             const id = characteristic.uuid.toLowerCase();
             if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) notifier = characteristic;
             if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) writer = characteristic;

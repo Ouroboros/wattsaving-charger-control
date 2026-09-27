@@ -38,6 +38,15 @@ const UUID = (short: string): string => `0000${short}-0000-1000-8000-00805f9b34f
 const SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
 const NOTIFY = new Set([UUID("ff01"), UUID("ffe4")]);
 const WRITE = new Set([UUID("ff02"), UUID("ffe9")]);
+// 标准 Bluetooth UUID 的短码是无损的；不把可能含设备标识的自定义 128 位 UUID 写入日志。
+function diagnosticUuid(value: unknown): string {
+  if (typeof value !== "string") return "missing";
+  const id = value.toLowerCase();
+  if (/^[0-9a-f]{4}$/.test(id)) return id;
+  const base = /^([0-9a-f]{8})-0000-1000-8000-00805f9b34fb$/.exec(id);
+  if (base) return base[1].startsWith("0000") ? base[1].slice(4) : base[1];
+  return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) ? "custom128" : "unexpected-format";
+}
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function encodeAscii(text: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(text.length));
@@ -102,7 +111,16 @@ export class ChargerClient {
   private storeVault(vault: Vault): void {
     this.fallbackVault = vault;
     try { localStorage.setItem(KEY, JSON.stringify(vault)); }
-    catch { this.emit({ type: "notice", message: "浏览器未允许本地存储；本次密码不会在下次打开时保留。" }); }
+    catch { this.emit({ type: "notice", message: "浏览器未允许本地存储；本次设备和密码不会在下次打开时保留。" }); }
+  }
+  private rememberConnectedDevice(device: BleDevice): void {
+    if (!device.id) { this.diagnose("device-remember-skipped", { reason: "missing-id" }, "warn"); return; }
+    const vault = this.loadVault();
+    const previous = vault.devices[device.id];
+    vault.lastId = device.id;
+    vault.devices[device.id] = { ...previous, name: device.name || previous?.name || "未命名设备" };
+    this.storeVault(vault);
+    this.diagnose("device-remembered", { known: !!previous });
   }
   forgetPassword(): void {
     const id = this.device?.id ?? this.loadVault().lastId;
@@ -156,14 +174,29 @@ export class ChargerClient {
       if (epoch !== this.epoch || !this.enabled()) { if (server.connected) server.disconnect(); return; }
       this.server = server;
       this.diagnose("gatt-connected");
+      this.rememberConnectedDevice(device);
       device.addEventListener("gattserverdisconnected", this.onDisconnected);
       let notifier: BleCharacteristic | null = null, writer: BleCharacteristic | null = null;
       for (const uuid of SERVICES) {
         let service: BleService;
         try { service = await this.server.getPrimaryService(uuid); }
         catch { this.diagnose("service-unavailable", { service: uuid.slice(4, 8) }); continue; }
-        this.diagnose("service-found", { service: uuid.slice(4, 8) });
-        for (const characteristic of await service.getCharacteristics()) {
+        const serviceCode = uuid.slice(4, 8);
+        this.diagnose("service-found", { service: serviceCode });
+        let characteristics: BleCharacteristic[];
+        try { characteristics = await service.getCharacteristics(); }
+        catch (error) {
+          this.diagnose("characteristics-error", { service: serviceCode, kind: error instanceof Error ? error.name : "unknown" }, "warn");
+          throw error;
+        }
+        this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
+        for (const [index, characteristic] of characteristics.entries()) {
+          const properties = characteristic.properties;
+          this.diagnose("characteristic-discovered", {
+            service: serviceCode, index, uuid: diagnosticUuid(characteristic.uuid),
+            propertiesAvailable: !!properties, notify: !!properties?.notify, indicate: !!properties?.indicate,
+            write: !!properties?.write, writeWithoutResponse: !!properties?.writeWithoutResponse
+          });
           const id = characteristic.uuid.toLowerCase();
           if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) notifier = characteristic;
           if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) writer = characteristic;

@@ -97,8 +97,30 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
 });
+test("GATT 已连接就记住设备；未确认的验证码不保存，下次无需弹选择器", async () => {
+  const storage = new MemoryStorage();
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = storage;
+  const device = new FakeDevice("private-device-id");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2);
+  assert.equal(client.rememberedName, device.name);
+  const saved = JSON.parse(storage.getItem("wattsaving-ble-devices-v1") ?? "null") as { lastId: string; devices: Record<string, { password?: string }> };
+  assert.equal(saved.lastId, device.id);
+  assert.equal(saved.devices[device.id]?.password, undefined);
+  client.disconnect();
+  let chooserCalls = 0;
+  const restored = new ChargerClient({
+    requestDevice: async () => { chooserCalls++; return device; },
+    getDevices: async () => [device]
+  }, () => {});
+  assert.equal(await restored.restore(), true);
+  assert.equal(restored.authorized, false);
+  assert.equal(chooserCalls, 0);
+  restored.disconnect();
+});
 test("密码不会发给另一台设备；设备拒绝缓存密码则删除并要求重新输入", async () => {
-  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const storage = new MemoryStorage();
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = storage;
   const first = new FakeDevice("A"), other = new FakeDevice("B");
   const adapter: BleAdapter = { requestDevice: async () => first, getDevices: async () => [first] };
   const client = new ChargerClient(adapter, () => {});
@@ -107,11 +129,16 @@ test("密码不会发给另一台设备；设备拒绝缓存密码则删除并�
   const otherClient = new ChargerClient({ requestDevice: async () => other }, () => {});
   await otherClient.chooseDevice(2); await tick();
   assert.equal(other.writer.sent.length, 0);
+  const afterOther = JSON.parse(storage.getItem("wattsaving-ble-devices-v1") ?? "null") as { lastId: string; devices: Record<string, { password?: string }> };
+  assert.equal(afterOther.lastId, "B");
+  assert.equal(afterOther.devices.A?.password, "54321");
+  assert.equal(afterOther.devices.B?.password, undefined);
   otherClient.disconnect();
   first.writer.authAccept = false;
   const events: string[] = [];
   const restored = new ChargerClient(adapter, event => events.push(event.type));
-  await restored.restore(); await tick();
+  assert.equal(await restored.restore(), false);
+  await restored.chooseDevice(2); await tick();
   assert.equal(restored.authorized, false);
   assert.ok(events.includes("auth-needed"));
   restored.disconnect();
@@ -145,6 +172,49 @@ test("真实 BLE 生命周期日志覆盖授权、控制与回执且不输出密
   const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
   for (const event of ["chooser-open", "gatt-connected", "service-found", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
   for (const secret of ["98765", "private-device-id", "测试设备", "@%PD-100"]) assert.equal(output.includes(secret), false);
+});
+test("特征不匹配时记录逐服务 UUID 短码和属性，自定义 UUID 不泄露", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new EventTarget() as BleDevice & { id: string; name: string; gatt: BleServer };
+  device.id = "private-device-id"; device.name = "private-device-name";
+  const characteristic = (uuid: string, properties: object): BleCharacteristic =>
+    Object.assign(new EventTarget(), { uuid, properties }) as BleCharacteristic;
+  const service0 = { getCharacteristics: async () => [characteristic("0000ffe1-0000-1000-8000-00805f9b34fb", { notify: true })] };
+  const customUuid = "c0ffee00-1111-2222-3333-444455556666";
+  const service5 = { getCharacteristics: async () => [characteristic("0000ffe2-0000-1000-8000-00805f9b34fb", { write: true }), characteristic(customUuid, { indicate: true, writeWithoutResponse: true })] };
+  const gatt: BleServer = {
+    connected: false,
+    connect: async () => { gatt.connected = true; return gatt; },
+    disconnect: () => { gatt.connected = false; device.dispatchEvent(new Event("gattserverdisconnected")); },
+    getPrimaryService: async uuid => {
+      if (uuid.startsWith("0000ffe0")) return service0;
+      if (uuid.startsWith("0000ffe5")) return service5;
+      throw new Error("service missing");
+    }
+  };
+  device.gatt = gatt;
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await assert.rejects(client.chooseDevice(), /找不到旧应用使用的通知\/写入特征/);
+  assert.equal(client.rememberedName, device.name);
+  let chooserCalls = 0;
+  const restored = new ChargerClient({
+    requestDevice: async () => { chooserCalls++; return device; },
+    getDevices: async () => [device]
+  }, () => {});
+  assert.equal(await restored.restore(), false);
+  assert.equal(chooserCalls, 0);
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  const entries = output.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line) as { event: string; data: Record<string, unknown> });
+  assert.deepEqual(entries.filter(entry => entry.event === "service-characteristics").map(entry => entry.data), [{ service: "ffe0", count: 1 }, { service: "ffe5", count: 2 }]);
+  const found = entries.filter(entry => entry.event === "characteristic-discovered").map(entry => entry.data);
+  assert.deepEqual(found.map(data => data.uuid), ["ffe1", "ffe2", "custom128"]);
+  assert.equal(found[0]?.notify, true);
+  assert.equal(found[1]?.write, true);
+  assert.equal(found[2]?.indicate, true);
+  assert.equal(found[2]?.writeWithoutResponse, true);
+  for (const secret of [device.id, device.name, customUuid, "@%PD-100"]) assert.equal(output.includes(secret), false);
 });
 test("预约和取消需设备匹配回执；拒绝及断线不冒充成功；日志不含原始报文", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
