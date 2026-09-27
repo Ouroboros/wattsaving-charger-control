@@ -26,4 +26,4 @@ await build({
     __BUILD_TIME__: JSON.stringify(builtAt)
   }
 });
-console.log(`Built v${version} ${revision} at ${builtAt} (UTC)`);
+console.log(`Built v${version} ${revision}; build time embedded for local-time display.`);

@@ -1,5 +1,5 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
-import { formatBuildInfo } from "./build-info";
+import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 
 declare const __BUILD_VERSION__: string;
 declare const __BUILD_REVISION__: string;
@@ -274,7 +274,7 @@ el("clearDiagnostics").addEventListener("click", () => {
 });
 resetReservationStart();
 diagnostics.add("app-start", { ...environment(), schema: 3,
-  buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeUTC: __BUILD_TIME__ });
+  buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeLocal: formatLocalBuildTime(__BUILD_TIME__) });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);

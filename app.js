@@ -878,10 +878,18 @@
   };
 
   // src/build-info.ts
+  var pad2 = (value) => String(value).padStart(2, "0");
+  function formatLocalBuildTime(builtAt) {
+    const date = new Date(builtAt);
+    if (!Number.isFinite(date.getTime())) return "\u672A\u77E5";
+    const offset = -date.getTimezoneOffset();
+    const sign = offset >= 0 ? "+" : "-";
+    const absolute = Math.abs(offset);
+    const local = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+    return `${local} ${sign}${pad2(Math.floor(absolute / 60))}:${pad2(absolute % 60)}`;
+  }
   function formatBuildInfo(info) {
-    const date = new Date(info.builtAt);
-    const time = Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 19).replace("T", " ")} UTC` : "\u672A\u77E5";
-    return `\u7248\u672C v${info.version} \xB7 \u63D0\u4EA4 ${info.revision} \xB7 \u6784\u5EFA ${time}`;
+    return `\u7248\u672C v${info.version} \xB7 \u63D0\u4EA4 ${info.revision} \xB7 \u6784\u5EFA\uFF08\u672C\u5730\uFF09 ${formatLocalBuildTime(info.builtAt)}`;
   }
 
   // src/countdown.ts
@@ -903,7 +911,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "89f533e", builtAt: "2026-09-27T04:38:08.395Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "c8f5104", builtAt: "2026-09-27T04:49:45.518Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -917,9 +925,9 @@
   var reservationStartAutomatic = true;
   var confirmedReservation = null;
   var recentMessages = [];
-  var pad2 = (value) => String(value).padStart(2, "0");
+  var pad3 = (value) => String(value).padStart(2, "0");
   function localMinute(date) {
-    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    return `${date.getFullYear()}-${pad3(date.getMonth() + 1)}-${pad3(date.getDate())}T${pad3(date.getHours())}:${pad3(date.getMinutes())}`;
   }
   function resetReservationStart() {
     reservationStartAutomatic = true;
@@ -1232,8 +1240,8 @@
     ...environment(),
     schema: 3,
     buildVersion: "0.1.0",
-    buildRevision: "89f533e",
-    buildTimeUTC: "2026-09-27T04:38:08.395Z"
+    buildRevision: "c8f5104",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T04:49:45.518Z")
   });
   refreshDiagnostics(true);
   render();
