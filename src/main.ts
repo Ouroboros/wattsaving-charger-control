@@ -1,4 +1,9 @@
 import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
+import { formatBuildInfo } from "./build-info";
+
+declare const __BUILD_VERSION__: string;
+declare const __BUILD_REVISION__: string;
+declare const __BUILD_TIME__: string;
 import { Diagnostics, diagnosticError, type DiagnosticEnvironment } from "./diagnostics";
 import { countdownTo } from "./countdown";
 import { nextMidnight, parseLocalMinute, validateReservation, type ControlAction, type DeviceStatus, type Reservation, type ReservationEnd, type Version } from "./protocol";
@@ -9,6 +14,7 @@ function el<T extends HTMLElement = HTMLElement>(id: string): T {
   return node as T;
 }
 const text = (id: string, value: string): void => { el(id).textContent = value; };
+text("buildInfo", formatBuildInfo({ version: __BUILD_VERSION__, revision: __BUILD_REVISION__, builtAt: __BUILD_TIME__ }));
 const adapter = (navigator as Navigator & { bluetooth?: BleAdapter }).bluetooth;
 const diagnostics = new Diagnostics();
 const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -267,7 +273,8 @@ el("clearDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
 resetReservationStart();
-diagnostics.add("app-start", { ...environment(), schema: 3 });
+diagnostics.add("app-start", { ...environment(), schema: 3,
+  buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeUTC: __BUILD_TIME__ });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);

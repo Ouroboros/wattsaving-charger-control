@@ -877,6 +877,13 @@
     }
   };
 
+  // src/build-info.ts
+  function formatBuildInfo(info) {
+    const date = new Date(info.builtAt);
+    const time = Number.isFinite(date.getTime()) ? `${date.toISOString().slice(0, 19).replace("T", " ")} UTC` : "\u672A\u77E5";
+    return `\u7248\u672C v${info.version} \xB7 \u63D0\u4EA4 ${info.revision} \xB7 \u6784\u5EFA ${time}`;
+  }
+
   // src/countdown.ts
   function countdownTo(startAtMs, nowMs = Date.now()) {
     if (!Number.isFinite(startAtMs) || !Number.isFinite(nowMs)) throw new Error("\u9884\u7EA6\u5012\u8BA1\u65F6\u7684\u65F6\u95F4\u65E0\u6548");
@@ -896,6 +903,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "89f533e", builtAt: "2026-09-27T04:38:08.395Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1220,7 +1228,13 @@
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
   resetReservationStart();
-  diagnostics.add("app-start", { ...environment(), schema: 3 });
+  diagnostics.add("app-start", {
+    ...environment(),
+    schema: 3,
+    buildVersion: "0.1.0",
+    buildRevision: "89f533e",
+    buildTimeUTC: "2026-09-27T04:38:08.395Z"
+  });
   refreshDiagnostics(true);
   render();
   setInterval(render, 5e3);

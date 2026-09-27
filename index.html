@@ -8,7 +8,7 @@
     :root { color-scheme:light; --ink:#17313b; --muted:#63747b; --line:#dce5e3; --bg:#eff3ef; --surface:#fff; --accent:#0c795b; --soft:#e5f4ec; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
     * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); } button,input,select,textarea { font:inherit; } button { cursor:pointer; } button:disabled { opacity:.48; cursor:not-allowed; }
     :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .top { background:#122c2a; color:#f4faf6; padding:20px max(22px,calc((100vw - 820px)/2)); display:flex; gap:20px; align-items:center; justify-content:space-between; }
-    .top strong { font-size:1.12rem; letter-spacing:.02em; } .top small { display:block; color:#bad5ca; margin-top:3px; } .badge { border:1px solid #7cac91; border-radius:99px; padding:6px 12px; font-size:.76rem; white-space:nowrap; }
+    .top strong { font-size:1.12rem; letter-spacing:.02em; } .top small { display:block; color:#bad5ca; margin-top:3px; } .top .build-info { overflow-wrap:anywhere; font-variant-numeric:tabular-nums; } .badge { border:1px solid #7cac91; border-radius:99px; padding:6px 12px; font-size:.76rem; white-space:nowrap; }
     main { max-width:820px; margin:26px auto; padding:0 20px; } .live { background:var(--surface); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 36px #18312a0a; overflow:hidden; }
     .workspace-head { padding:20px 24px; background:#f9fbf8; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; } .workspace-head h1 { font-size:1.35rem; margin:0; } .workspace-head small { color:var(--muted); }
     .screen { padding:22px 24px 26px; } [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; min-width:0; max-width:100%; }
@@ -38,7 +38,7 @@
   </style>
 </head>
 <body>
-  <header class="top"><div><strong>WattSaving · 充电桩控制</strong><small>个人用网页 · 非官方产品</small></div><span class="badge">真机控制 · 尚待实机验证</span></header>
+  <header class="top"><div><strong>WattSaving · 充电桩控制</strong><small>个人用网页 · 非官方产品</small><small id="buildInfo" class="build-info">版本信息未载入</small></div><span class="badge">真机控制 · 尚待实机验证</span></header>
   <main><section class="live" id="liveWorkspace" aria-label="蓝牙充电桩控制">
     <div class="workspace-head"><div><h1>充电桩控制</h1><small>状态仅来自设备通知</small></div><span class="status" id="livePhase">未连接</span></div>
     <div class="screen">
@@ -82,6 +82,6 @@
       <div class="notice">尚未与真实充电桩及 Bluefy 联调。首次预约请在设备旁核对设备回执、预约开始时间和结束方式；收到提交回执不等于预约已按时执行。</div>
     </div>
   </section></main>
-  <script defer src="./app.js?v=disconnect-discovery-v3"></script>
+  <script defer src="./app.js?v=build-info-v1"></script>
 </body>
 </html>
