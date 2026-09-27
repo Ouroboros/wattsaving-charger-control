@@ -1208,7 +1208,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "c79faa0", builtAt: "2026-09-27T08:45:42.330Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "ae7c8e7", builtAt: "2026-09-27T08:50:08.417Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1349,8 +1349,8 @@
   function render() {
     if (feedbackDirty && Date.now() - lastFeedbackPaintAt >= STATUS_FEEDBACK_INTERVAL_MS) paintFeedback();
     const supported = !!adapter && window.isSecureContext;
-    text("liveSupport", !window.isSecureContext ? "\u5F53\u524D\u4E0D\u662F\u5B89\u5168\u4E0A\u4E0B\u6587\uFF0CWeb Bluetooth \u4E0D\u53EF\u7528\uFF1B\u8BF7\u4ECE Bluefy \u6253\u5F00 HTTPS GitHub Pages \u5730\u5740\u3002" : !adapter ? "\u6D4F\u89C8\u5668\u672A\u63D0\u4F9B Web Bluetooth\u3002\u8BF7\u5728 iPhone \u7684 Bluefy \u4E2D\u6253\u5F00\u5DF2\u53D1\u5E03\u7684 HTTPS \u9875\u9762\u3002" : "\u68C0\u6D4B\u5230 Web Bluetooth API\uFF1B\u4ECD\u9700\u5B9E\u9645\u8BBE\u5907\u6388\u6743\u4E0E\u901A\u4FE1\u6D4B\u8BD5\u3002");
-    el("liveSupport").className = `notice ${supported ? "light" : ""}`;
+    el("liveSupport").hidden = supported;
+    if (!supported) text("liveSupport", !window.isSecureContext ? "\u5F53\u524D\u4E0D\u662F\u5B89\u5168\u4E0A\u4E0B\u6587\uFF0CWeb Bluetooth \u4E0D\u53EF\u7528\uFF1B\u8BF7\u4ECE Bluefy \u6253\u5F00 HTTPS GitHub Pages \u5730\u5740\u3002" : "\u6D4F\u89C8\u5668\u672A\u63D0\u4F9B Web Bluetooth\u3002\u8BF7\u5728 iPhone \u7684 Bluefy \u4E2D\u6253\u5F00\u5DF2\u53D1\u5E03\u7684 HTTPS \u9875\u9762\u3002");
     const device = client?.currentDevice;
     const status2 = client?.currentStatus ?? null;
     const fresh = !!status2 && Date.now() - statusAt < 2e4;
@@ -1659,8 +1659,8 @@
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "c79faa0",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:45:42.330Z")
+    buildRevision: "ae7c8e7",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:50:08.417Z")
   });
   refreshDiagnostics(true);
   render();

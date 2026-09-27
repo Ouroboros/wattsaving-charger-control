@@ -139,9 +139,9 @@ function handleEvent(event: ChargerEvent): void {
 function render(): void {
   if (feedbackDirty && Date.now() - lastFeedbackPaintAt >= STATUS_FEEDBACK_INTERVAL_MS) paintFeedback();
   const supported = !!adapter && window.isSecureContext;
-  text("liveSupport", !window.isSecureContext ? "当前不是安全上下文，Web Bluetooth 不可用；请从 Bluefy 打开 HTTPS GitHub Pages 地址。" :
-    !adapter ? "浏览器未提供 Web Bluetooth。请在 iPhone 的 Bluefy 中打开已发布的 HTTPS 页面。" : "检测到 Web Bluetooth API；仍需实际设备授权与通信测试。");
-  el("liveSupport").className = `notice ${supported ? "light" : ""}`;
+  el("liveSupport").hidden = supported;
+  if (!supported) text("liveSupport", !window.isSecureContext ? "当前不是安全上下文，Web Bluetooth 不可用；请从 Bluefy 打开 HTTPS GitHub Pages 地址。" :
+    "浏览器未提供 Web Bluetooth。请在 iPhone 的 Bluefy 中打开已发布的 HTTPS 页面。");
   const device = client?.currentDevice;
   const status = client?.currentStatus ?? null;
   const fresh = !!status && Date.now() - statusAt < 20000;

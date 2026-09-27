@@ -49,7 +49,7 @@
     </div>
     <div class="screen">
       <section id="tabPanelConnection" role="tabpanel" aria-labelledby="tabConnection" style="margin-top:16px">
-      <div class="notice" id="liveSupport">正在检测浏览器蓝牙能力…</div>
+      <div class="notice" id="liveSupport" hidden>正在检测浏览器蓝牙能力…</div>
       <div class="panel" style="margin-top:16px"><h2>设备连接</h2><p id="liveDevice" class="sub">尚未选择设备</p>
         <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
         <p class="footer">自动识别依赖设备通知；若没有通知，可手动选择。无法确认协议时不会发送密码。</p>
@@ -97,6 +97,6 @@
       </section>
     </div>
   </section></main>
-  <script defer src="./app.js?v=sticky-tabs-about-v1"></script>
+  <script defer src="./app.js?v=bluetooth-warning-only-v1"></script>
 </body>
 </html>
