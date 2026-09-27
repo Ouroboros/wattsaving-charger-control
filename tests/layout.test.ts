@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-test("四个标签置顶、连接灯在标题内，充电与预约同页", () => {
+test("四个标签固定在底部、连接灯在标题内，充电与预约同页", () => {
   const html = readFileSync("index.html", "utf8");
   assert.match(html, /id="liveTabs" role="tablist"/);
   for (const [tab, panel] of [
@@ -13,7 +13,8 @@ test("四个标签置顶、连接灯在标题内，充电与预约同页", () =>
     assert.match(html, new RegExp(`id="${panel}"[^>]*aria-labelledby="${tab}"`));
   }
   assert.match(html, /id="tabConnection"[^>]*><span class="connection-dot" id="livePhase"/);
-  assert.match(html, /\.tabs \{ position:sticky; top:0;/);
+  assert.match(html, /\.tabs \{ position:fixed; bottom:0;/);
+  assert.ok(html.indexOf('id="liveTabs"') > html.indexOf('id="tabPanelAbout"'));
   assert.match(html, /id="tabPanelCharge"[^>]*hidden>/);
   assert.match(html, /id="tabPanelFeedback"[^>]*hidden>/);
   assert.match(html, /id="tabPanelAbout"[^>]*hidden>/);
