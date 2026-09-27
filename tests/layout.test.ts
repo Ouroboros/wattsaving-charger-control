@@ -26,8 +26,7 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   const connection = html.slice(html.indexOf('<section id="tabPanelConnection"'), html.indexOf('<section id="tabPanelCharge"'));
   const charge = html.slice(html.indexOf('<section id="tabPanelCharge"'), html.indexOf('<section id="tabPanelExperiment"'));
   const experiment = html.slice(html.indexOf('<section id="tabPanelExperiment"'), html.indexOf('<section id="tabPanelFeedback"'));
-  assert.match(experiment, /id="experimentSend"/);
-  assert.match(experiment, /只接收 APP 使用的 0x23／54/);
+  assert.doesNotMatch(experiment, /手动实验：功率档位|id="experimentSend"|id="experimentGear"|id="experimentReportedPower"|id="experimentReportedGear"|23 0B 32/);
   assert.match(experiment, /id="experimentQueryVin"/);
   assert.match(experiment, /id="experimentQueryNetwork"/);
   assert.doesNotMatch(experiment, /id="experimentPile"|id="experimentGun"|id="experimentAutoQuery"/);
@@ -44,6 +43,13 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   assert.doesNotMatch(about, /个人用网页 · 非官方产品|真机控制 · 尚待实机验证/);
   assert.match(html, /id="liveLog" role="log" aria-live="off"/);
   assert.match(html, /\.log \{[^}]*max-height:240px; overflow-y:auto;/);
+});
+
+test("实验页和发送实现都不再提供档位写入；只保留手动查询", () => {
+  const source = readFileSync("src/experimental.ts", "utf8") + readFileSync("src/ble.ts", "utf8") + readFileSync("src/main.ts", "utf8");
+  assert.doesNotMatch(source, /experimentalGear|pendingGear|gear-reply|experimental-ack|0x32|手动实验：功率档位/);
+  assert.match(source, /experimentalQueryCommand/);
+  assert.match(source, /experimentalIdentityReady/);
 });
 
 test("刷新页面不会自动连接，只允许点击按钮恢复上次设备", () => {

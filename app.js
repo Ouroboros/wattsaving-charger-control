@@ -300,34 +300,23 @@
   function byteHex(value) {
     return value.toString(16).padStart(2, "0").toUpperCase();
   }
-  function frameFor(pile, gun, opcode, parameter) {
-    if (!/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun)) throw new Error("\u7F3A\u5C11\u8BBE\u5907\u72B6\u6001\u5E27\u4E2D\u7684\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0C\u7981\u6B62\u731C\u6D4B\u62A5\u6587\u5B57\u6BB5");
-    const frame = new Uint8Array(new ArrayBuffer(parameter === void 0 ? 10 : 11));
-    frame.set([35, frame.length, opcode]);
-    for (let i = 0; i < 4; i++) frame[3 + i] = Number.parseInt(pile.slice(i * 2, i * 2 + 2), 16);
-    frame[7] = Number.parseInt(gun, 16);
-    if (parameter !== void 0) frame[8] = parameter;
-    frame[frame.length - 2] = 102;
-    frame[frame.length - 1] = frame.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 255;
-    return frame;
-  }
-  function experimentalGearCommand(pile, gun, gear) {
-    if (!Number.isInteger(gear) || gear < 0 || gear > 3) throw new Error("\u5B9E\u9A8C\u6027\u6863\u4F4D\u4EC5\u5141\u8BB8 0\uFF5E3");
-    return frameFor(pile, gun, 50, gear);
-  }
   function experimentalQueryCommand(pile, gun, query) {
     if (query !== "vin-list" && query !== "network-info") throw new Error("\u672A\u77E5\u7684 APP \u67E5\u8BE2\u64CD\u4F5C");
-    return frameFor(pile, gun, query === "vin-list" ? 37 : 68);
+    if (!/^[0-9a-fA-F]{8}$/.test(pile) || !/^[0-9a-fA-F]{2}$/.test(gun)) throw new Error("\u7F3A\u5C11\u8BBE\u5907\u72B6\u6001\u5E27\u4E2D\u7684\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0C\u7981\u6B62\u731C\u6D4B\u62A5\u6587\u5B57\u6BB5");
+    const frame = new Uint8Array(new ArrayBuffer(10));
+    frame.set([35, 10, query === "vin-list" ? 37 : 68]);
+    for (let i = 0; i < 4; i++) frame[3 + i] = Number.parseInt(pile.slice(i * 2, i * 2 + 2), 16);
+    frame[7] = Number.parseInt(gun, 16);
+    frame[8] = 102;
+    frame[9] = frame.slice(0, 9).reduce((sum, byte) => sum + byte, 0) & 255;
+    return frame;
   }
   function parseExperimentalFrame(bytes) {
     if (bytes.length < 5 || bytes.length !== bytes[1] || bytes[0] !== 35 || bytes[bytes.length - 2] !== 102 || (bytes.slice(0, -1).reduce((sum, byte) => sum + byte, 0) & 255) !== bytes[bytes.length - 1]) return null;
-    if (bytes[2] === 130 && bytes.length >= 11) return { type: "gear-reply", code: bytes[8], accepted: bytes[8] === 1 };
     if (bytes[2] === 117 && bytes.length >= 11) return { type: "vin-list-reply", accepted: bytes[8] === 1 };
-    if (bytes[2] === 148 && bytes.length >= 5) return { type: "network-info-reply" };
+    if (bytes[2] === 148) return { type: "network-info-reply" };
     if (bytes[2] === 84 && bytes.length >= 55) return {
-      type: "power-report",
-      powerTenths: bytes[50] | bytes[51] << 8,
-      gear: bytes[52],
+      type: "identity-report",
       pile: [...bytes.slice(3, 7)].map(byteHex).join(""),
       gun: byteHex(bytes[7])
     };
@@ -479,7 +468,6 @@
       __publicField(this, "pendingControl", null);
       __publicField(this, "pendingReservation", null);
       __publicField(this, "pendingAdmin", null);
-      __publicField(this, "pendingGear", null);
       __publicField(this, "pendingQuery", null);
       __publicField(this, "binaryIdentity", null);
       __publicField(this, "adminVerified", false);
@@ -499,7 +487,7 @@
           pendingControl: !!this.pendingControl,
           pendingReservation: !!this.pendingReservation,
           pendingAdmin: !!this.pendingAdmin,
-          pendingGear: !!this.pendingGear,
+          pendingQuery: !!this.pendingQuery,
           notifications: this.rxNotifications
         }, "warn");
         this.diagnose("disconnect-rx-summary", {
@@ -546,7 +534,7 @@
       return !!this.pendingAdmin;
     }
     get experimentalPending() {
-      return !!(this.pendingGear || this.pendingQuery);
+      return !!this.pendingQuery;
     }
     get experimentalIdentityReady() {
       if (!this.authorized || !this.binaryIdentity || this.binaryIdentity.epoch !== this.epoch) return false;
@@ -1023,18 +1011,6 @@
       await this.write(syncClock(this.protocol), "clock-sync");
       this.emit({ type: "notice", message: "\u5DF2\u53D1\u9001\u8BBE\u5907\u65F6\u949F\u540C\u6B65\u5E27\uFF0C\u7B49\u5F85\u72B6\u6001\u901A\u77E5\u3002" });
     }
-    experimentalGear(gear) {
-      if (!this.authorized || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u987B\u5148\u53D6\u5F97\u8FD1\u671F\u8BBE\u5907\u6388\u6743\u72B6\u6001\uFF1B\u4E0D\u80FD\u51ED\u65E7\u72B6\u6001\u5C1D\u8BD5\u6863\u4F4D");
-      if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
-      const { pile, gun } = this.experimentalIdentity();
-      const bytes = experimentalGearCommand(pile, gun, gear);
-      this.diagnose("experimental-gear-request", { gear, bytes: bytes.length });
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.rejectExperimental(new Error("\u672A\u540C\u65F6\u6536\u5230 82/01 \u56DE\u6267\u548C 54 \u6863\u4F4D\u72B6\u6001\uFF1B\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u73B0\u573A\u6838\u5BF9\uFF0C\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 12e3);
-        this.pendingGear = { gear, pile, gun, ack: false, observed: false, resolve, reject, timer };
-        void this.writeBytes(bytes, "experimental-gear").catch((error) => this.rejectExperimental(new Error(`\u53D1\u9001\u5B9E\u9A8C\u6027\u6863\u4F4D\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
-      });
-    }
     experimentalQuery(query) {
       if (!this.authorized) throw new Error("\u987B\u5148\u53D6\u5F97\u8BBE\u5907\u84DD\u7259\u6388\u6743");
       if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
@@ -1054,22 +1030,6 @@
       clearTimeout(pending.timer);
       this.diagnose("experimental-query-unconfirmed", { query: pending.query, reason }, "warn");
       pending.reject(error);
-    }
-    rejectExperimental(error, reason) {
-      const pending = this.pendingGear;
-      if (!pending) return;
-      this.pendingGear = null;
-      clearTimeout(pending.timer);
-      this.diagnose("experimental-gear-unconfirmed", { gear: pending.gear, reason, replyAccepted: pending.ack, statusMatched: pending.observed }, "warn");
-      pending.reject(error);
-    }
-    confirmExperimental() {
-      const pending = this.pendingGear;
-      if (!pending || !pending.ack || !pending.observed) return;
-      this.pendingGear = null;
-      clearTimeout(pending.timer);
-      this.diagnose("experimental-gear-confirmed", { gear: pending.gear, evidence: "82-ack-and-54-status" });
-      pending.resolve();
     }
     control(action) {
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
@@ -1191,41 +1151,23 @@
         this.diagnose("experimental-reply-ignored", { reason: "not-authorized" });
         return;
       }
-      if (frame.type === "power-report") {
+      if (frame.type === "identity-report") {
         this.binaryIdentity = { pile: frame.pile, gun: frame.gun, at: Date.now(), epoch: this.epoch };
-        this.emit({ type: "experimental-power", gear: frame.gear, powerTenths: frame.powerTenths });
-        const pending2 = this.pendingGear;
-        if (pending2 && frame.gear === pending2.gear && frame.pile === pending2.pile && frame.gun === pending2.gun) {
-          pending2.observed = true;
-          this.confirmExperimental();
-        }
+        this.emit({ type: "experimental-identity" });
         return;
       }
       if (frame.type === "vin-list-reply" || frame.type === "network-info-reply") {
-        const pending2 = this.pendingQuery;
-        if (!pending2 || frame.type !== (pending2.query === "vin-list" ? "vin-list-reply" : "network-info-reply")) {
+        const pending = this.pendingQuery;
+        if (!pending || frame.type !== (pending.query === "vin-list" ? "vin-list-reply" : "network-info-reply")) {
           this.diagnose("experimental-reply-ignored", { reason: "query-mismatch-or-no-pending" });
           return;
         }
         this.pendingQuery = null;
-        clearTimeout(pending2.timer);
+        clearTimeout(pending.timer);
         const result = frame.type === "vin-list-reply" ? frame.accepted ? "accepted" : "rejected" : "received";
-        this.diagnose("experimental-query-reply", { query: pending2.query, result });
-        pending2.resolve(result);
-        return;
+        this.diagnose("experimental-query-reply", { query: pending.query, result });
+        pending.resolve(result);
       }
-      const pending = this.pendingGear;
-      if (!pending) {
-        this.diagnose("experimental-reply-ignored", { reason: "no-pending" });
-        return;
-      }
-      this.emit({ type: "experimental-ack", gear: pending.gear, accepted: frame.accepted });
-      if (!frame.accepted) {
-        this.rejectExperimental(new Error("\u8BBE\u5907 82 \u56DE\u6267\u672A\u8FD4\u56DE 01\uFF1B\u62D2\u7EDD\u6216\u7ED3\u679C\u672A\u77E5"), "rejected");
-        return;
-      }
-      pending.ack = true;
-      this.confirmExperimental();
     }
     onFrame(frame) {
       if (frame.type === "unknown") {
@@ -1408,7 +1350,6 @@
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectAdmin(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u7BA1\u7406\u64CD\u4F5C\u7ED3\u679C\u672A\u77E5"), "disconnect");
-      this.rejectExperimental(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6863\u4F4D\u64CD\u4F5C\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectQuery(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u67E5\u8BE2\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.binaryIdentity = null;
       this.adminVerified = false;
@@ -1645,7 +1586,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "72d07da", builtAt: "2026-09-27T18:55:00.692Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "8b91c07", builtAt: "2026-09-27T19:21:33.725Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var localStorageAccess;
@@ -1664,9 +1605,7 @@
   var staleLoggedFor = 0;
   var reservationResult = "";
   var adminMessage = "";
-  var experimentResult = "";
   var experimentQueryResult = "";
-  var experimentReport = null;
   var lastBlockedReservation = "";
   var reservationStartAutomatic = true;
   var confirmedReservation = null;
@@ -1830,9 +1769,7 @@
       if (phase === "offline" || phase === "connecting") {
         reservationResult = "";
         adminMessage = "";
-        experimentResult = "";
         experimentQueryResult = "";
-        experimentReport = null;
       }
       diagnostics.add("phase", { phase });
       record(event.message);
@@ -1844,12 +1781,6 @@
     if (event.type === "reservation") {
       reservationResult = event.message;
       record(event.message);
-    }
-    if (event.type === "experimental-power" && client?.authorized && client.currentDevice?.id) {
-      experimentReport = { deviceId: client.currentDevice.id, gear: event.gear, powerTenths: event.powerTenths, at: Date.now() };
-    }
-    if (event.type === "experimental-ack") {
-      experimentResult = event.accepted ? `\u8BBE\u5907 82/01 \u5DF2\u63A5\u53D7\u6863\u4F4D ${event.gear}\uFF1B\u7B49\u5F85 54 \u72B6\u6001\u786E\u8BA4\u3002` : `\u8BBE\u5907 82 \u56DE\u6267\u672A\u63A5\u53D7\u6863\u4F4D ${event.gear}\u3002`;
     }
     if (event.type === "protocol") record(`\u534F\u8BAE\uFF1A${event.version === 1 ? "\u65E7\u7248" : "\u65B0\u7248"}\uFF08${event.source}\uFF09`);
     if (event.type === "auth-needed") record(event.message);
@@ -1911,15 +1842,8 @@
     text("liveElectrical", status2 ? `\u6545\u969C\u72B6\u6001\uFF1A${faultDescription(status2)}\uFF08${status2.power || "\u672A\u62A5\u544A"}\uFF09` : "\u65E0\u8BBE\u5907\u6570\u636E");
     el("liveFaultDetail").disabled = !status2;
     text("liveFreshness", !status2 ? "\u5C1A\u672A\u6536\u5230\u8BBE\u5907\u72B6\u6001" : fresh ? "\u8BBE\u5907\u72B6\u6001\uFF1A\u521A\u66F4\u65B0\uFF08\u5B9E\u65F6\u901A\u77E5\uFF09" : "\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF0C\u64CD\u4F5C\u5DF2\u7981\u7528\uFF0C\u8BF7\u5237\u65B0");
-    const report = client?.authorized && experimentReport?.deviceId === device?.id ? experimentReport : null;
-    const reportFresh = !!report && Date.now() - report.at < 2e4;
-    text("experimentReportedGear", reportFresh ? String(report.gear) : "--");
-    text("experimentReportedPower", reportFresh ? String(report.powerTenths / 10) : "--");
-    text("experimentReportAge", !report ? "\u5C1A\u672A\u6536\u5230\u6709\u6548\u7684\u4E8C\u8FDB\u5236 54 \u901A\u77E5\u3002" : reportFresh ? `\u6536\u5230\u8BBE\u5907 54 \u901A\u77E5\uFF08${new Date(report.at).toLocaleTimeString("zh-CN")}\uFF09\uFF1B\u4EC5\u4E3A\u88AB\u52A8\u8BFB\u53D6\u3002` : "\u4E0A\u6B21 54 \u901A\u77E5\u5DF2\u8FC7\u671F\uFF1B\u5F53\u524D\u529F\u7387\u548C\u6863\u4F4D\u672A\u77E5\u3002");
-    text("experimentResult", experimentResult || "\u5C1A\u672A\u6267\u884C\u5B9E\u9A8C\u64CD\u4F5C\u3002");
     text("experimentQueryResult", experimentQueryResult || "\u5C1A\u672A\u53D1\u8D77 APP \u67E5\u8BE2\u3002");
-    text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 54 \u901A\u77E5\u53D6\u5F97\u6869\u7F16\u7801\u4E0E\u67AA\u53F7\uFF1B\u4E0D\u5C55\u793A\u3001\u4E0D\u4FDD\u5B58\u3002" : "\u5C1A\u65E0\u5F53\u524D\u8BBE\u5907\u8FD1\u671F\u6709\u6548\u7684 54 \u901A\u77E5\uFF1B\u4E0D\u53EF\u731C\u6D4B\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0C\u5B9E\u9A8C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002");
-    el("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending || !client.experimentalIdentityReady;
+    text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 54 \u901A\u77E5\u53D6\u5F97\u6869\u7F16\u7801\u4E0E\u67AA\u53F7\uFF1B\u4E0D\u5C55\u793A\u3001\u4E0D\u4FDD\u5B58\u3002" : "\u5C1A\u65E0\u5F53\u524D\u8BBE\u5907\u8FD1\u671F\u6709\u6548\u7684 54 \u901A\u77E5\uFF1B\u4E0D\u53EF\u731C\u6D4B\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0CAPP \u67E5\u8BE2\u6682\u4E0D\u53EF\u7528\u3002");
     for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
       el(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
     const loginProgress = el("liveLoginProgress");
@@ -2026,25 +1950,6 @@
       return;
     }
     void client.refresh().catch((error) => failure("\u540C\u6B65\u72B6\u6001", error));
-  });
-  el("experimentSend").addEventListener("click", () => {
-    if (!client || busy || !client.authorized || !client.experimentalIdentityReady || !client.currentStatus || Date.now() - statusAt >= 2e4) return;
-    const gear = Number(el("experimentGear").value);
-    if (!window.confirm(`\u5B9E\u9A8C\u547D\u4EE4\uFF0C\u65E7\u8BBE\u5907\u672A\u9A8C\u8BC1\u3002\u6863\u4F4D ${gear} \u4E0E 22\uFF0F7\uFF0F11\uFF0F16 kW \u7684\u5BF9\u5E94\u5173\u7CFB\u672A\u77E5\u3002
-\u8BBE\u5907\u5B57\u6BB5\u4EC5\u4ECE\u5F53\u524D\u8FDE\u63A5\u7684\u6709\u6548 54 \u901A\u77E5\u81EA\u52A8\u53D6\u5F97\uFF0C\u4E0D\u5C55\u793A\u539F\u59CB\u62A5\u6587\u3002
-\u4EC5 82/01 \u52A0 54 \u72B6\u6001\u5339\u914D\u624D\u663E\u793A\u53CC\u91CD\u786E\u8BA4\uFF1B\u65E0\u81EA\u52A8\u91CD\u8BD5\u3002\u7EE7\u7EED\u5417\uFF1F`)) return;
-    busy = true;
-    experimentResult = `\u5DF2\u8BF7\u6C42\u6863\u4F4D ${gear}\uFF0C\u7B49\u5F85\u8BBE\u5907 82 \u56DE\u6267\u53CA 54 \u72B6\u6001\u2026`;
-    render();
-    void client.experimentalGear(gear).then(() => {
-      experimentResult = `\u8BBE\u5907 82/01 \u5DF2\u63A5\u53D7\u300154 \u5DF2\u62A5\u544A\u6863\u4F4D ${gear}\uFF1B\u5B9E\u9645\u8F93\u51FA\u529F\u7387\u987B\u73B0\u573A\u6838\u5BF9\u3002`;
-    }, (error) => {
-      experimentResult = `\u6863\u4F4D ${gear} \u672A\u5F97\u5230\u53CC\u91CD\u786E\u8BA4\uFF1A${errorMessage(error)}`;
-      failure("\u5B9E\u9A8C\u6863\u4F4D", error);
-    }).finally(() => {
-      busy = false;
-      render();
-    });
   });
   for (const [id, query, label, reply] of [
     ["experimentQueryVin", "vin-list", "VIN \u5217\u8868", "75"],
@@ -2347,8 +2252,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "72d07da",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T18:55:00.692Z")
+    buildRevision: "8b91c07",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:21:33.725Z")
   });
   refreshDiagnostics(true);
   render();
@@ -2365,7 +2270,6 @@ ${faultAdvice(status2)}
     updateReservationCountdown();
   });
   window.addEventListener("pagehide", (event) => {
-    experimentReport = null;
     diagnostics.add("page-hide", {
       persisted: event.persisted,
       connected: !!client?.currentDevice?.gatt?.connected,

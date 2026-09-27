@@ -34,9 +34,7 @@ let statusAt = 0;
 let staleLoggedFor = 0;
 let reservationResult = "";
 let adminMessage = "";
-let experimentResult = "";
 let experimentQueryResult = "";
-let experimentReport: { deviceId: string; gear: number; powerTenths: number; at: number } | null = null;
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
 let confirmedReservation: { deviceId: string; startsAt: number; source: "session" | "restored" } | null = null;
@@ -177,18 +175,12 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "phase") {
     phase = event.phase;
     if (phase === "offline" || phase === "connecting") {
-      reservationResult = ""; adminMessage = ""; experimentResult = ""; experimentQueryResult = ""; experimentReport = null;
+      reservationResult = ""; adminMessage = ""; experimentQueryResult = "";
     }
     diagnostics.add("phase", { phase }); record(event.message);
   }
   if (event.type === "notice") { record(event.message); if (event.severity === "error") showErrorModal(event.message); }
   if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
-  if (event.type === "experimental-power" && client?.authorized && client.currentDevice?.id) {
-    experimentReport = { deviceId: client.currentDevice.id, gear: event.gear, powerTenths: event.powerTenths, at: Date.now() };
-  }
-  if (event.type === "experimental-ack") {
-    experimentResult = event.accepted ? `设备 82/01 已接受档位 ${event.gear}；等待 54 状态确认。` : `设备 82 回执未接受档位 ${event.gear}。`;
-  }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
@@ -245,18 +237,10 @@ function render(): void {
   text("liveElectrical", status ? `故障状态：${faultDescription(status)}（${status.power || "未报告"}）` : "无设备数据");
   el<HTMLButtonElement>("liveFaultDetail").disabled = !status;
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
-  const report = client?.authorized && experimentReport?.deviceId === device?.id ? experimentReport : null;
-  const reportFresh = !!report && Date.now() - report.at < 20000;
-  text("experimentReportedGear", reportFresh ? String(report!.gear) : "--");
-  text("experimentReportedPower", reportFresh ? String(report!.powerTenths / 10) : "--");
-  text("experimentReportAge", !report ? "尚未收到有效的二进制 54 通知。" : reportFresh ?
-    `收到设备 54 通知（${new Date(report.at).toLocaleTimeString("zh-CN")}）；仅为被动读取。` : "上次 54 通知已过期；当前功率和档位未知。");
-  text("experimentResult", experimentResult || "尚未执行实验操作。");
   text("experimentQueryResult", experimentQueryResult || "尚未发起 APP 查询。");
   text("experimentIdentityStatus", client?.experimentalIdentityReady ?
     "已从当前设备校验有效的 54 通知取得桩编码与枪号；不展示、不保存。" :
-    "尚无当前设备近期有效的 54 通知；不可猜测桩编码或枪号，实验操作暂不可用。");
-  el<HTMLButtonElement>("experimentSend").disabled = !client?.authorized || !fresh || busy || !!client?.experimentalPending || !client.experimentalIdentityReady;
+    "尚无当前设备近期有效的 54 通知；不可猜测桩编码或枪号，APP 查询暂不可用。");
   for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
     el<HTMLButtonElement>(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
   const loginProgress = el("liveLoginProgress");
@@ -351,18 +335,6 @@ el("liveRefresh").addEventListener("click", () => {
     diagnostics.add("ui-cancelled", { action: "clock-sync" }); refreshDiagnostics(); return;
   }
   void client.refresh().catch(error => failure("同步状态", error));
-});
-el("experimentSend").addEventListener("click", () => {
-  if (!client || busy || !client.authorized || !client.experimentalIdentityReady || !client.currentStatus || Date.now() - statusAt >= 20000) return;
-  const gear = Number(el<HTMLSelectElement>("experimentGear").value);
-  if (!window.confirm(`实验命令，旧设备未验证。档位 ${gear} 与 22／7／11／16 kW 的对应关系未知。\n设备字段仅从当前连接的有效 54 通知自动取得，不展示原始报文。\n仅 82/01 加 54 状态匹配才显示双重确认；无自动重试。继续吗？`)) return;
-  busy = true; experimentResult = `已请求档位 ${gear}，等待设备 82 回执及 54 状态…`; render();
-  void client.experimentalGear(gear).then(() => {
-    experimentResult = `设备 82/01 已接受、54 已报告档位 ${gear}；实际输出功率须现场核对。`;
-  }, error => {
-    experimentResult = `档位 ${gear} 未得到双重确认：${errorMessage(error)}`;
-    failure("实验档位", error);
-  }).finally(() => { busy = false; render(); });
 });
 for (const [id, query, label, reply] of [
   ["experimentQueryVin", "vin-list", "VIN 列表", "75"],
@@ -577,7 +549,6 @@ document.addEventListener("visibilitychange", () => {
   refreshDiagnostics(); updateReservationCountdown();
 });
 window.addEventListener("pagehide", event => {
-  experimentReport = null;
   diagnostics.add("page-hide", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
 });
