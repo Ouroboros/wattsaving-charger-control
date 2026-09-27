@@ -1,4 +1,4 @@
-import { ChargerClient, type BleAdapter, type ChargerEvent } from "./ble";
+import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEvent } from "./ble";
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 
 declare const __BUILD_VERSION__: string;
@@ -25,6 +25,7 @@ let phase = "offline";
 let busy = false;
 let statusAt = 0;
 let reservationResult = "";
+let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
 let confirmedReservation: { deviceId: string; startsAt: number } | null = null;
 const recentMessages: string[] = [];
@@ -83,6 +84,7 @@ const stateName = (status: DeviceStatus | null): string => {
   if (status.state === "4") return "充电中";
   if (status.state === "3") return "设备报出故障";
   if (status.state === "2") return "已就绪";
+  if (status.state === "5") return "充电结束（原小程序标为 ChargEnd）";
   return `设备状态 ${status.state || "未知"}（含义未核实）`;
 };
 function record(message: string): void {
@@ -107,7 +109,10 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
-  if (event.type === "status") { statusAt = Date.now(); record("收到设备状态通知。"); }
+  if (event.type === "status") {
+    if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
+    statusAt = Date.now(); record("收到设备状态通知。");
+  }
   refreshDiagnostics();
   render();
 }
@@ -131,15 +136,16 @@ function render(): void {
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
   el("liveAuthBox").hidden = !device || !!client?.authorized;
   el<HTMLButtonElement>("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
-  el<HTMLButtonElement>("liveStart").disabled = !client?.authorized || !fresh || busy || !status || status.state !== "2" || status.gunFlag === "1" || status.selfStartFlag === "2" || status.mode === "3";
+  el<HTMLButtonElement>("liveStart").disabled = !client?.authorized || !fresh || busy;
   el<HTMLButtonElement>("liveStop").disabled = !client?.authorized || !fresh || busy || status?.state !== "4";
   el<HTMLButtonElement>("liveUnlock").disabled = !client?.authorized || !fresh || busy || !status || status.state === "4" || status.mode === "3" || status.lock === "0";
   el<HTMLButtonElement>("liveRefresh").disabled = !client?.authorized || busy;
   el<HTMLButtonElement>("liveDisconnect").disabled = !device;
   el<HTMLButtonElement>("liveChoose").disabled = !supported || busy;
+  el<HTMLButtonElement>("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
   el<HTMLButtonElement>("liveForgetPassword").disabled = !client?.rememberedName;
-  const reservable = !!client?.authorized && fresh && !!status && status.state === "2" && status.gunFlag !== "1" && status.lock !== "0" && status.selfStartFlag !== "2" && status.mode !== "5";
-  el<HTMLButtonElement>("reserveSubmit").disabled = !reservable || busy || !!client?.reservationPending;
+  const reservationBlocked = status ? reservationBlockReason(status) : null;
+  el<HTMLButtonElement>("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
   text("reserveSubmit", client?.canCancelReservation ? "修改预约" : "提交预约");
   el<HTMLButtonElement>("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status?.state === "4" || !client?.canCancelReservation;
   const reserveInput = el<HTMLInputElement>("reserveStart");
@@ -148,7 +154,7 @@ function render(): void {
   reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1000));
   text("reserveState", !client?.authorized ? "连接并授权后可预约。" : client.reservationPending ? "指令已发送，等待设备预约回执；此时勿重复提交。" :
     reservationResult || !fresh ? reservationResult || "等待最新设备状态，操作暂不可用。" : status?.mode === "3" ? "设备通知显示预约模式；可修改或取消。" :
-    client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
+    reservationBlocked ? reservationBlocked : client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
   updateReservationCountdown();
 }
 function selectedProtocol(): Version | undefined {
@@ -160,6 +166,17 @@ el("liveChoose").addEventListener("click", () => {
   // 设备选择器必须从点击事件直接调用。
   void client.chooseDevice(selectedProtocol()).catch(error => failure("选择/连接", error));
 });
+async function reconnectLast(source: "button" | "auto"): Promise<void> {
+  if (!client || busy) return;
+  diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
+  busy = true; render();
+  try {
+    const found = await client.restore();
+    diagnostics.add("restore-finish", { source, discovered: found });
+    if (!found) record("Bluefy 未返回上次设备的浏览器授权；网页不能仅凭名称或 ID 连接，请用「选择 / 更换设备」重新授权。");
+  } finally { busy = false; render(); }
+}
+el("liveRestore").addEventListener("click", () => { void reconnectLast("button"); });
 el("liveProtocol").addEventListener("change", () => {
   const version = selectedProtocol();
   if (!version || !client?.currentDevice || client.authorized) return;
@@ -185,6 +202,13 @@ el("liveRefresh").addEventListener("click", () => {
 async function control(action: ControlAction): Promise<void> {
   if (!client) return;
   const name = { start: "开始充电", stop: "停止充电", unlock: "解除电子锁" }[action];
+  if (action === "start" && client.currentStatus) {
+    const s = client.currentStatus;
+    const blocked = s.gunFlag === "1" ? "请先插枪" : s.selfStartFlag === "2" ? "请先取消即插即充功能" :
+      s.mode === "3" ? "请先取消预约充电" : s.state !== "2" ? "请先拔枪再插枪" : null;
+    diagnostics.add("control-gate", { action, allowed: !blocked, state: s.state, gun: s.gunFlag, mode: s.mode, selfStart: s.selfStartFlag });
+    if (blocked) { record(blocked); refreshDiagnostics(); return; }
+  }
   if (!window.confirm(`确定向真实充电桩发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) {
     diagnostics.add("ui-cancelled", { action }); refreshDiagnostics(); return;
   }
@@ -207,6 +231,14 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
   if (!client) return;
   let reservation: Reservation | undefined;
   if (action === "submit") {
+    const status = client.currentStatus;
+    if (status) {
+      const blocked = reservationBlockReason(status);
+      diagnostics.add("reservation-ui-gate", { allowed: !blocked, state: status.state, gun: status.gunFlag,
+        lock: status.lock, mode: status.mode, selfStart: status.selfStartFlag });
+      if (blocked) { lastBlockedReservation = blocked; reservationResult = blocked; record(blocked); refreshDiagnostics(); render(); return; }
+      lastBlockedReservation = "";
+    }
     try { reservation = selectedReservation(); }
     catch (error) { diagnostics.add("reservation-input-error", diagnosticError(error), "warn"); reservationResult = errorMessage(error); record(reservationResult); render(); return; }
   }
@@ -283,7 +315,7 @@ document.addEventListener("visibilitychange", updateReservationCountdown);
 if (client?.rememberedName && window.isSecureContext) {
   diagnostics.add("restore-auto-start", { remembered: true }); refreshDiagnostics();
   record("尝试恢复上次设备的浏览器授权…");
-  void client.restore().then(restored => { if (!restored) record("未找到可恢复的设备，请点击「选择 / 更换设备」手动连接。"); render(); });
+  void reconnectLast("auto");
 } else {
   diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
   refreshDiagnostics();

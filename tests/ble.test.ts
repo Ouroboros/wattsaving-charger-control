@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ChargerClient, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer } from "../src/ble";
+import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
 import { nextMidnight } from "../src/protocol";
 
@@ -96,6 +96,19 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(restored.authorized, true);
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
+});
+test("同一页面断线后点击恢复直接复用设备对象，无需选择器或 getDevices", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  let chooserCalls = 0;
+  const client = new ChargerClient({ requestDevice: async () => { chooserCalls++; return device; } }, () => {});
+  await client.chooseDevice(2);
+  client.disconnect();
+  assert.equal(await client.restore(), true);
+  assert.equal(chooserCalls, 1);
+  assert.equal(client.currentDevice, device);
+  client.forgetDevice();
+  assert.equal(await client.restore(), false);
 });
 test("FFE0/FFE5 返回短码特征时保持连接，提示输入验证码且授权前不写入", async () => {
   for (const [notifyUuid, writeUuid] of [["ffe4", "ffe9"], ["0000ffe4", "0000ffe9"]]) {
@@ -459,9 +472,10 @@ test("预约和取消需设备匹配回执；拒绝及断线不冒充成功；�
   device.notifier.push(stateFrame("2", "3"));
   assert.equal(client.canCancelReservation, true);
   device.notifier.push(stateFrame("2"));
+  device.notifier.push(stateFrame("5", "2", "0"));
+  assert.throws(() => client.submitReservation(reservation), /充电准备状态/);
   device.notifier.push(stateFrame("2", "2", "0"));
-  assert.throws(() => client.submitReservation(reservation), /上锁/);
-  device.notifier.push(stateFrame("2"));
+  assert.equal(reservationBlockReason(client.currentStatus!), null);
   await client.submitReservation(reservation);
   assert.equal(client.canCancelReservation, true);
   assert.equal(client.currentStatus?.mode, "3");
@@ -482,4 +496,19 @@ test("预约和取消需设备匹配回执；拒绝及断线不冒充成功；�
   const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
   for (const event of ["reservation-request", "reservation-reply", "reservation-unconfirmed"]) assert.ok(output.includes(event));
   for (const secret of ["98765", "private-reservation-device", "@%PD-114"]) assert.equal(output.includes(secret), false);
+  assert.ok(output.includes("reservation-gate"));
+});
+test("重复未识别通知仅保留计数摘要，不冲掉连接与授权诊断", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  for (let i = 0; i < 128; i++) device.notifier.push("@%DP-999-0-181-1-@");
+  const unknown = log.recent.filter(entry => entry.event === "rx-unknown-summary");
+  assert.ok(unknown.length < 15);
+  assert.ok(unknown.some(entry => entry.data.count === 128));
+  assert.ok(log.recent.some(entry => entry.event === "rx-notification" && entry.data.notifications === 128));
+  client.disconnect();
 });

@@ -44,6 +44,15 @@ const WRITE = new Set([UUID("ff02"), UUID("ffe9")]);
 class ConnectionInterruptedError extends Error {
   constructor() { super("蓝牙连接在服务发现期间已中止；无法判断设备的服务或特征是否存在"); this.name = "ConnectionInterruptedError"; }
 }
+// 对齐原小程序首页 yuyue() 与预约页 submit()：不把电子锁值作为额外门槛。
+export function reservationBlockReason(status: DeviceStatus): string | null {
+  if (status.state === "4" && status.mode !== "3") return "当前处于充电中，不能进行预约操作";
+  if (status.selfStartFlag === "2") return "请先取消即插即充功能";
+  if (status.mode === "5") return "请先取消无感充电功能";
+  if (status.state !== "2") return "设备不在充电准备状态，请先拔枪再插枪";
+  if (status.gunFlag === "1") return "请先插枪";
+  return null;
+}
 // 标准 Bluetooth UUID 的短码是无损的；不把可能含设备标识的自定义 128 位 UUID 写入日志。
 function diagnosticUuid(value: unknown): string {
   if (typeof value !== "string") return "missing";
@@ -86,6 +95,7 @@ export class ChargerClient {
   private readonly enabled: () => boolean;
   private readonly diagnose: (event: string, data?: Record<string, DiagnosticValue>, level?: DiagnosticLevel) => void;
   private device: BleDevice | null = null;
+  private recentDevice: BleDevice | null = null; // 本次页面已授权的对象；断开后仍可直接重连。
   private server: BleServer | null = null;
   private writer: BleCharacteristic | null = null;
   private notifier: BleCharacteristic | null = null;
@@ -94,6 +104,7 @@ export class ChargerClient {
   private rxNotifications = 0;
   private rxBytes = 0;
   private decodedFrames = 0;
+  private unknownFrames = 0;
   private statusFrames = 0;
   private lastStatusSignature = "";
   private epoch = 0;
@@ -151,6 +162,7 @@ export class ChargerClient {
     const vault = this.loadVault();
     const previous = vault.devices[device.id];
     vault.lastId = device.id;
+    this.recentDevice = device;
     vault.devices[device.id] = { ...previous, name: device.name || previous?.name || "未命名设备" };
     const persisted = this.storeVault(vault);
     this.diagnose("device-remembered", { known: !!previous, persisted });
@@ -162,23 +174,37 @@ export class ChargerClient {
   }
   forgetDevice(): void {
     this.disconnect("forget-device");
+    this.recentDevice = null;
     this.storeVault({ lastId: "", devices: {} });
     this.emit({ type: "notice", message: "已清除该网站保存的设备和蓝牙验证码。" });
   }
   private setPhase(phase: Phase, message: string): void { this.phase = phase; this.emit({ type: "phase", phase, message }); }
   async restore(): Promise<boolean> {
     const id = this.loadVault().lastId;
-    if (!id || !this.adapter.getDevices || !this.enabled()) {
-      const reason = !id ? "no-record" : !this.adapter.getDevices ? "api-unavailable" : "control-disabled";
-      this.diagnose("restore-skipped", { reason, remembered: !!id, getDevices: !!this.adapter.getDevices });
+    if (!id || !this.enabled()) {
+      this.diagnose("restore-skipped", { reason: !id ? "no-record" : "control-disabled", remembered: !!id });
       return false;
     }
     try {
-      this.diagnose("restore-search");
+      const inPage = this.recentDevice?.id === id ? this.recentDevice : null;
+      if (inPage) {
+        this.diagnose("restore-source", { source: "current-page" });
+        await this.connect(inPage);
+        return true;
+      }
+      if (!this.adapter.getDevices) {
+        this.diagnose("restore-unavailable", { reason: "get-devices-missing" }, "warn");
+        return false;
+      }
+      this.diagnose("restore-search", { source: "browser-grants" });
       const devices = await this.adapter.getDevices();
       const remembered = devices.find(device => device.id === id);
       this.diagnose("restore-result", { found: !!remembered, candidates: devices.length, enabled: this.enabled() });
-      if (!remembered || !this.enabled()) return false;
+      if (!remembered || !this.enabled()) {
+        this.diagnose("restore-unavailable", { reason: "grant-not-returned", candidates: devices.length }, "warn");
+        return false;
+      }
+      this.diagnose("restore-source", { source: "browser-grants" });
       await this.connect(remembered);
       return true;
     } catch (error) {
@@ -412,8 +438,11 @@ export class ChargerClient {
     if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 20000) throw new Error("设备状态不存在或已过期；请先刷新状态");
     if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("上一条指令尚未确认");
     const status = this.latest;
-    if (action === "submit" && (status.state !== "2" || status.gunFlag === "1" || status.lock === "0" || status.selfStartFlag === "2" || status.mode === "5")) {
-      throw new Error("预约需要设备就绪、已插枪上锁，且未启用即插即充或无感充电");
+    if (action === "submit") {
+      const blocked = reservationBlockReason(status);
+      this.diagnose("reservation-gate", { allowed: !blocked, state: status.state, gun: status.gunFlag,
+        lock: status.lock, mode: status.mode, selfStart: status.selfStartFlag });
+      if (blocked) throw new Error(blocked);
     }
     if (action === "cancel" && (status.state === "4" || !this.canCancelReservation)) throw new Error("未确认设备处于可取消的预约状态；请先刷新状态");
     const frame = reservationCommand(this.protocol, action, reservation);
@@ -449,14 +478,19 @@ export class ChargerClient {
     const frames = this.decoder.feed(decodeAscii(view));
     this.rxNotifications++; this.rxBytes += view.byteLength; this.decodedFrames += frames.length;
     // 分片与未知格式也要可见；连续通知只记录前六次及 2 的幂，避免冲掉发现阶段的日志。
-    if (frames.some(frame => frame.type !== "status") || this.rxNotifications <= 6 || !(this.rxNotifications & (this.rxNotifications - 1))) {
+    if (frames.some(frame => frame.type !== "status" && frame.type !== "unknown") || this.rxNotifications <= 6 || !(this.rxNotifications & (this.rxNotifications - 1))) {
       this.diagnose("rx-notification", { bytes: view.byteLength, parsed: frames.length,
         notifications: this.rxNotifications, totalBytes: this.rxBytes, totalParsed: this.decodedFrames });
     }
     for (const frame of frames) this.onFrame(frame);
   }
   private onFrame(frame: Frame): void {
-    if (frame.type !== "status") this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
+    if (frame.type === "unknown") {
+      this.unknownFrames++;
+      if (this.unknownFrames <= 3 || !(this.unknownFrames & (this.unknownFrames - 1))) {
+        this.diagnose("rx-unknown-summary", { version: frame.protocol, count: this.unknownFrames });
+      }
+    } else if (frame.type !== "status") this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
     if (!this.protocol) this.chooseProtocol(frame.protocol, "设备通知");
     if (frame.protocol !== this.protocol) {
       this.diagnose("protocol-mismatch", { expected: this.protocol, actual: frame.protocol, type: frame.type }, "warn");
@@ -557,7 +591,7 @@ export class ChargerClient {
     }
     this.protocol = null; this.latest = null; this.latestAt = 0;
     this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset();
-    this.rxNotifications = 0; this.rxBytes = 0; this.decodedFrames = 0;
+    this.rxNotifications = 0; this.rxBytes = 0; this.decodedFrames = 0; this.unknownFrames = 0;
     this.statusFrames = 0; this.lastStatusSignature = "";
     this.connectionStage = "offline"; this.connectedAt = 0;
     this.setPhase("offline", "未连接充电桩");

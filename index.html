@@ -18,7 +18,7 @@
     .status:before { content:""; width:8px; height:8px; background:#81908c; border-radius:100%; } .status.good { color:#0d694e; background:#e1f4e9; } .status.good:before { background:#12a26e; }
     .hero { background:linear-gradient(138deg,#163d36,#285b44); color:white; padding:22px; border-radius:16px; margin:0 0 16px; } .hero h2 { font-size:1.45rem; margin:13px 0 8px; } .hero p { color:#d6e9d9; font-size:.86rem; margin:0; }
     .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-top:19px; } .metric { background:#ffffff17; border:1px solid #ffffff20; border-radius:12px; padding:10px; } .metric strong { display:block; font-size:1.07rem; } .metric span { font-size:.71rem; color:#d5e8dc; }
-    .actions { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:16px 0; } .primary,.secondary,.danger { padding:11px 16px; border-radius:11px; font-weight:700; border:1px solid transparent; }
+    .actions { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin:16px 0; } .actions #liveDisconnect { grid-column:1 / -1; } .primary,.secondary,.danger { padding:11px 16px; border-radius:11px; font-weight:700; border:1px solid transparent; }
     .primary { background:var(--accent); color:white; } .primary:hover { background:#096a50; } .secondary { border-color:#b4c9bd; background:#fff; color:#236a54; } .danger { border-color:#e6c9b9; background:#fff4ee; color:#9b4e2d; } .full { width:100%; }
     .notice { color:#8c552d; background:#fff6e6; border:1px solid #eed5af; border-radius:10px; padding:11px 12px; font-size:.84rem; } .notice.light { background:var(--soft); border-color:#bddec9; color:#24614b; }
     .log { background:#f5f8f5; border:1px solid var(--line); border-radius:10px; white-space:pre-line; padding:12px; min-height:58px; font-size:.85rem; } .footer,.panel small { font-size:.79rem; color:var(--muted); margin:14px 0 0; }
@@ -46,8 +46,8 @@
       <div class="panel" style="margin-top:16px"><h2>设备连接</h2><p id="liveDevice" class="sub">尚未选择设备</p>
         <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
         <p class="footer">自动识别依赖设备通知；若没有通知，可手动选择。无法确认协议时不会发送密码。</p>
-        <div class="actions"><button id="liveChoose" class="primary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
-        <small>协议：<span id="liveProtocolName">等待识别</span>。恢复上次设备依赖 Bluefy 是否支持 getDevices()，失败可手动选择。</small>
+        <div class="actions"><button id="liveRestore" class="primary" type="button" disabled>一键连接上次设备</button><button id="liveChoose" class="secondary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
+        <small>协议：<span id="liveProtocolName">等待识别</span>。本页断线后可直接重连；重新打开页面后须由 Bluefy 的 getDevices() 返回已授权设备，否则浏览器规定必须重新选择授权。</small>
       </div>
       <div class="panel" id="liveAuthBox" hidden><h2>设备蓝牙验证码</h2><label for="livePassword">五位验证码</label><input id="livePassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="仅发送给所选 BLE 设备">
         <label class="check"><input id="rememberPassword" type="checkbox" checked>验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
@@ -70,7 +70,7 @@
         <p class="sub" id="reserveState" role="status" aria-live="polite">连接并授权后，收到设备实时状态即可预约。</p>
         <div id="reserveCountdownBox" class="reserve-countdown" role="timer" aria-live="off" hidden><strong id="reserveCountdown">00:00:00</strong><span id="reserveCountdownLabel">后开始充电（本地时钟估算）</span><small>仅按本次页面收到的设备回执与 iPhone 时钟计算；刷新页面后不保留，实际启动仍以设备状态为准。</small></div>
         <div class="actions"><button class="primary" id="reserveSubmit" type="button" disabled>提交预约</button><button class="danger" id="reserveCancel" type="button" disabled>取消预约</button></div>
-        <p class="footer">需在未来 24 小时内预约，先插枪并上锁。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。设备确认后由充电桩自行执行；网页不会在后台定时发送开始指令。</p>
+        <p class="footer">需在未来 24 小时内预约。提交条件按原小程序：插枪、未在充电中、未启用即插即充或无感充电、设备处于充电准备状态；不额外要求电子锁状态。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。仅设备确认后视为提交成功；网页不会在后台定时发送开始指令。</p>
       </div>
       <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
       <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="status" aria-live="polite">尚无设备事件</div></div>

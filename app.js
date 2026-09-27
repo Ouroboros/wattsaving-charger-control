@@ -268,6 +268,14 @@
       this.name = "ConnectionInterruptedError";
     }
   };
+  function reservationBlockReason(status2) {
+    if (status2.state === "4" && status2.mode !== "3") return "\u5F53\u524D\u5904\u4E8E\u5145\u7535\u4E2D\uFF0C\u4E0D\u80FD\u8FDB\u884C\u9884\u7EA6\u64CD\u4F5C";
+    if (status2.selfStartFlag === "2") return "\u8BF7\u5148\u53D6\u6D88\u5373\u63D2\u5373\u5145\u529F\u80FD";
+    if (status2.mode === "5") return "\u8BF7\u5148\u53D6\u6D88\u65E0\u611F\u5145\u7535\u529F\u80FD";
+    if (status2.state !== "2") return "\u8BBE\u5907\u4E0D\u5728\u5145\u7535\u51C6\u5907\u72B6\u6001\uFF0C\u8BF7\u5148\u62D4\u67AA\u518D\u63D2\u67AA";
+    if (status2.gunFlag === "1") return "\u8BF7\u5148\u63D2\u67AA";
+    return null;
+  }
   function diagnosticUuid(value) {
     if (typeof value !== "string") return "missing";
     const id = value.toLowerCase();
@@ -312,6 +320,8 @@
       __publicField(this, "enabled");
       __publicField(this, "diagnose");
       __publicField(this, "device", null);
+      __publicField(this, "recentDevice", null);
+      // 本次页面已授权的对象；断开后仍可直接重连。
       __publicField(this, "server", null);
       __publicField(this, "writer", null);
       __publicField(this, "notifier", null);
@@ -320,6 +330,7 @@
       __publicField(this, "rxNotifications", 0);
       __publicField(this, "rxBytes", 0);
       __publicField(this, "decodedFrames", 0);
+      __publicField(this, "unknownFrames", 0);
       __publicField(this, "statusFrames", 0);
       __publicField(this, "lastStatusSignature", "");
       __publicField(this, "epoch", 0);
@@ -402,6 +413,7 @@
       const vault = this.loadVault();
       const previous = vault.devices[device.id];
       vault.lastId = device.id;
+      this.recentDevice = device;
       vault.devices[device.id] = { ...previous, name: device.name || previous?.name || "\u672A\u547D\u540D\u8BBE\u5907" };
       const persisted = this.storeVault(vault);
       this.diagnose("device-remembered", { known: !!previous, persisted });
@@ -416,6 +428,7 @@
     }
     forgetDevice() {
       this.disconnect("forget-device");
+      this.recentDevice = null;
       this.storeVault({ lastId: "", devices: {} });
       this.emit({ type: "notice", message: "\u5DF2\u6E05\u9664\u8BE5\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
     }
@@ -425,17 +438,30 @@
     }
     async restore() {
       const id = this.loadVault().lastId;
-      if (!id || !this.adapter.getDevices || !this.enabled()) {
-        const reason = !id ? "no-record" : !this.adapter.getDevices ? "api-unavailable" : "control-disabled";
-        this.diagnose("restore-skipped", { reason, remembered: !!id, getDevices: !!this.adapter.getDevices });
+      if (!id || !this.enabled()) {
+        this.diagnose("restore-skipped", { reason: !id ? "no-record" : "control-disabled", remembered: !!id });
         return false;
       }
       try {
-        this.diagnose("restore-search");
+        const inPage = this.recentDevice?.id === id ? this.recentDevice : null;
+        if (inPage) {
+          this.diagnose("restore-source", { source: "current-page" });
+          await this.connect(inPage);
+          return true;
+        }
+        if (!this.adapter.getDevices) {
+          this.diagnose("restore-unavailable", { reason: "get-devices-missing" }, "warn");
+          return false;
+        }
+        this.diagnose("restore-search", { source: "browser-grants" });
         const devices = await this.adapter.getDevices();
         const remembered = devices.find((device) => device.id === id);
         this.diagnose("restore-result", { found: !!remembered, candidates: devices.length, enabled: this.enabled() });
-        if (!remembered || !this.enabled()) return false;
+        if (!remembered || !this.enabled()) {
+          this.diagnose("restore-unavailable", { reason: "grant-not-returned", candidates: devices.length }, "warn");
+          return false;
+        }
+        this.diagnose("restore-source", { source: "browser-grants" });
         await this.connect(remembered);
         return true;
       } catch (error) {
@@ -731,8 +757,17 @@
       if (!this.authorized || !this.protocol || !this.latest || Date.now() - this.latestAt > 2e4) throw new Error("\u8BBE\u5907\u72B6\u6001\u4E0D\u5B58\u5728\u6216\u5DF2\u8FC7\u671F\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
       if (this.pendingControl || this.pendingReservation || this.pendingAuth) throw new Error("\u4E0A\u4E00\u6761\u6307\u4EE4\u5C1A\u672A\u786E\u8BA4");
       const status2 = this.latest;
-      if (action === "submit" && (status2.state !== "2" || status2.gunFlag === "1" || status2.lock === "0" || status2.selfStartFlag === "2" || status2.mode === "5")) {
-        throw new Error("\u9884\u7EA6\u9700\u8981\u8BBE\u5907\u5C31\u7EEA\u3001\u5DF2\u63D2\u67AA\u4E0A\u9501\uFF0C\u4E14\u672A\u542F\u7528\u5373\u63D2\u5373\u5145\u6216\u65E0\u611F\u5145\u7535");
+      if (action === "submit") {
+        const blocked = reservationBlockReason(status2);
+        this.diagnose("reservation-gate", {
+          allowed: !blocked,
+          state: status2.state,
+          gun: status2.gunFlag,
+          lock: status2.lock,
+          mode: status2.mode,
+          selfStart: status2.selfStartFlag
+        });
+        if (blocked) throw new Error(blocked);
       }
       if (action === "cancel" && (status2.state === "4" || !this.canCancelReservation)) throw new Error("\u672A\u786E\u8BA4\u8BBE\u5907\u5904\u4E8E\u53EF\u53D6\u6D88\u7684\u9884\u7EA6\u72B6\u6001\uFF1B\u8BF7\u5148\u5237\u65B0\u72B6\u6001");
       const frame = reservationCommand(this.protocol, action, reservation);
@@ -772,7 +807,7 @@
       this.rxNotifications++;
       this.rxBytes += view.byteLength;
       this.decodedFrames += frames.length;
-      if (frames.some((frame) => frame.type !== "status") || this.rxNotifications <= 6 || !(this.rxNotifications & this.rxNotifications - 1)) {
+      if (frames.some((frame) => frame.type !== "status" && frame.type !== "unknown") || this.rxNotifications <= 6 || !(this.rxNotifications & this.rxNotifications - 1)) {
         this.diagnose("rx-notification", {
           bytes: view.byteLength,
           parsed: frames.length,
@@ -784,7 +819,12 @@
       for (const frame of frames) this.onFrame(frame);
     }
     onFrame(frame) {
-      if (frame.type !== "status") this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
+      if (frame.type === "unknown") {
+        this.unknownFrames++;
+        if (this.unknownFrames <= 3 || !(this.unknownFrames & this.unknownFrames - 1)) {
+          this.diagnose("rx-unknown-summary", { version: frame.protocol, count: this.unknownFrames });
+        }
+      } else if (frame.type !== "status") this.diagnose("rx-frame", { type: frame.type, version: frame.protocol });
       if (!this.protocol) this.chooseProtocol(frame.protocol, "\u8BBE\u5907\u901A\u77E5");
       if (frame.protocol !== this.protocol) {
         this.diagnose("protocol-mismatch", { expected: this.protocol, actual: frame.protocol, type: frame.type }, "warn");
@@ -923,6 +963,7 @@
       this.rxNotifications = 0;
       this.rxBytes = 0;
       this.decodedFrames = 0;
+      this.unknownFrames = 0;
       this.statusFrames = 0;
       this.lastStatusSignature = "";
       this.connectionStage = "offline";
@@ -965,7 +1006,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "73cfaad", builtAt: "2026-09-27T05:31:34.596Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "983cd99", builtAt: "2026-09-27T06:43:26.814Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -976,6 +1017,7 @@
   var busy = false;
   var statusAt = 0;
   var reservationResult = "";
+  var lastBlockedReservation = "";
   var reservationStartAutomatic = true;
   var confirmedReservation = null;
   var recentMessages = [];
@@ -1036,6 +1078,7 @@
     if (status2.state === "4") return "\u5145\u7535\u4E2D";
     if (status2.state === "3") return "\u8BBE\u5907\u62A5\u51FA\u6545\u969C";
     if (status2.state === "2") return "\u5DF2\u5C31\u7EEA";
+    if (status2.state === "5") return "\u5145\u7535\u7ED3\u675F\uFF08\u539F\u5C0F\u7A0B\u5E8F\u6807\u4E3A ChargEnd\uFF09";
     return `\u8BBE\u5907\u72B6\u6001 ${status2.state || "\u672A\u77E5"}\uFF08\u542B\u4E49\u672A\u6838\u5B9E\uFF09`;
   };
   function record(message2) {
@@ -1066,6 +1109,7 @@
     if (event.type === "protocol") record(`\u534F\u8BAE\uFF1A${event.version === 1 ? "\u65E7\u7248" : "\u65B0\u7248"}\uFF08${event.source}\uFF09`);
     if (event.type === "auth-needed") record(event.message);
     if (event.type === "status") {
+      if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
       statusAt = Date.now();
       record("\u6536\u5230\u8BBE\u5907\u72B6\u6001\u901A\u77E5\u3002");
     }
@@ -1090,22 +1134,23 @@
     text("liveFreshness", !status2 ? "\u5C1A\u672A\u6536\u5230\u8BBE\u5907\u72B6\u6001" : fresh ? "\u8BBE\u5907\u72B6\u6001\uFF1A\u521A\u66F4\u65B0\uFF08\u5B9E\u65F6\u901A\u77E5\uFF09" : "\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF0C\u64CD\u4F5C\u5DF2\u7981\u7528\uFF0C\u8BF7\u5237\u65B0");
     el("liveAuthBox").hidden = !device || !!client?.authorized;
     el("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
-    el("liveStart").disabled = !client?.authorized || !fresh || busy || !status2 || status2.state !== "2" || status2.gunFlag === "1" || status2.selfStartFlag === "2" || status2.mode === "3";
+    el("liveStart").disabled = !client?.authorized || !fresh || busy;
     el("liveStop").disabled = !client?.authorized || !fresh || busy || status2?.state !== "4";
     el("liveUnlock").disabled = !client?.authorized || !fresh || busy || !status2 || status2.state === "4" || status2.mode === "3" || status2.lock === "0";
     el("liveRefresh").disabled = !client?.authorized || busy;
     el("liveDisconnect").disabled = !device;
     el("liveChoose").disabled = !supported || busy;
+    el("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
     el("liveForgetPassword").disabled = !client?.rememberedName;
-    const reservable = !!client?.authorized && fresh && !!status2 && status2.state === "2" && status2.gunFlag !== "1" && status2.lock !== "0" && status2.selfStartFlag !== "2" && status2.mode !== "5";
-    el("reserveSubmit").disabled = !reservable || busy || !!client?.reservationPending;
+    const reservationBlocked = status2 ? reservationBlockReason(status2) : null;
+    el("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
     text("reserveSubmit", client?.canCancelReservation ? "\u4FEE\u6539\u9884\u7EA6" : "\u63D0\u4EA4\u9884\u7EA6");
     el("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status2?.state === "4" || !client?.canCancelReservation;
     const reserveInput = el("reserveStart");
     if (reservationStartAutomatic && reserveInput.value !== localMinute(nextMidnight())) resetReservationStart();
     reserveInput.min = localMinute(/* @__PURE__ */ new Date());
     reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1e3));
-    text("reserveState", !client?.authorized ? "\u8FDE\u63A5\u5E76\u6388\u6743\u540E\u53EF\u9884\u7EA6\u3002" : client.reservationPending ? "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0C\u7B49\u5F85\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u6B64\u65F6\u52FF\u91CD\u590D\u63D0\u4EA4\u3002" : reservationResult || !fresh ? reservationResult || "\u7B49\u5F85\u6700\u65B0\u8BBE\u5907\u72B6\u6001\uFF0C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002" : status2?.mode === "3" ? "\u8BBE\u5907\u901A\u77E5\u663E\u793A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u4FEE\u6539\u6216\u53D6\u6D88\u3002" : client.canCancelReservation ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u63D0\u4EA4\uFF0C\u5C1A\u5F85\u65B0\u7684\u9884\u7EA6\u6A21\u5F0F\u72B6\u6001\u901A\u77E5\u3002" : "\u8BBE\u5907\u672A\u62A5\u544A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u8BBE\u7F6E\u65B0\u7684\u9884\u7EA6\u3002");
+    text("reserveState", !client?.authorized ? "\u8FDE\u63A5\u5E76\u6388\u6743\u540E\u53EF\u9884\u7EA6\u3002" : client.reservationPending ? "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0C\u7B49\u5F85\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u6B64\u65F6\u52FF\u91CD\u590D\u63D0\u4EA4\u3002" : reservationResult || !fresh ? reservationResult || "\u7B49\u5F85\u6700\u65B0\u8BBE\u5907\u72B6\u6001\uFF0C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002" : status2?.mode === "3" ? "\u8BBE\u5907\u901A\u77E5\u663E\u793A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u4FEE\u6539\u6216\u53D6\u6D88\u3002" : reservationBlocked ? reservationBlocked : client.canCancelReservation ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u63D0\u4EA4\uFF0C\u5C1A\u5F85\u65B0\u7684\u9884\u7EA6\u6A21\u5F0F\u72B6\u6001\u901A\u77E5\u3002" : "\u8BBE\u5907\u672A\u62A5\u544A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u8BBE\u7F6E\u65B0\u7684\u9884\u7EA6\u3002");
     updateReservationCountdown();
   }
   function selectedProtocol() {
@@ -1115,6 +1160,23 @@
   el("liveChoose").addEventListener("click", () => {
     if (!client) return;
     void client.chooseDevice(selectedProtocol()).catch((error) => failure("\u9009\u62E9/\u8FDE\u63A5", error));
+  });
+  async function reconnectLast(source) {
+    if (!client || busy) return;
+    diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
+    busy = true;
+    render();
+    try {
+      const found = await client.restore();
+      diagnostics.add("restore-finish", { source, discovered: found });
+      if (!found) record("Bluefy \u672A\u8FD4\u56DE\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\uFF1B\u7F51\u9875\u4E0D\u80FD\u4EC5\u51ED\u540D\u79F0\u6216 ID \u8FDE\u63A5\uFF0C\u8BF7\u7528\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u91CD\u65B0\u6388\u6743\u3002");
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+  el("liveRestore").addEventListener("click", () => {
+    void reconnectLast("button");
   });
   el("liveProtocol").addEventListener("change", () => {
     const version = selectedProtocol();
@@ -1151,6 +1213,16 @@
   async function control(action) {
     if (!client) return;
     const name = { start: "\u5F00\u59CB\u5145\u7535", stop: "\u505C\u6B62\u5145\u7535", unlock: "\u89E3\u9664\u7535\u5B50\u9501" }[action];
+    if (action === "start" && client.currentStatus) {
+      const s = client.currentStatus;
+      const blocked = s.gunFlag === "1" ? "\u8BF7\u5148\u63D2\u67AA" : s.selfStartFlag === "2" ? "\u8BF7\u5148\u53D6\u6D88\u5373\u63D2\u5373\u5145\u529F\u80FD" : s.mode === "3" ? "\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u5145\u7535" : s.state !== "2" ? "\u8BF7\u5148\u62D4\u67AA\u518D\u63D2\u67AA" : null;
+      diagnostics.add("control-gate", { action, allowed: !blocked, state: s.state, gun: s.gunFlag, mode: s.mode, selfStart: s.selfStartFlag });
+      if (blocked) {
+        record(blocked);
+        refreshDiagnostics();
+        return;
+      }
+    }
     if (!window.confirm(`\u786E\u5B9A\u5411\u771F\u5B9E\u5145\u7535\u6869\u53D1\u9001\u300C${name}\u300D\u6307\u4EE4\uFF1F
 \u6536\u5230\u8BBE\u5907\u72B6\u6001\u53D8\u5316\u540E\u624D\u4F1A\u663E\u793A\u5B8C\u6210\u3002`)) {
       diagnostics.add("ui-cancelled", { action });
@@ -1189,6 +1261,27 @@
     if (!client) return;
     let reservation;
     if (action === "submit") {
+      const status2 = client.currentStatus;
+      if (status2) {
+        const blocked = reservationBlockReason(status2);
+        diagnostics.add("reservation-ui-gate", {
+          allowed: !blocked,
+          state: status2.state,
+          gun: status2.gunFlag,
+          lock: status2.lock,
+          mode: status2.mode,
+          selfStart: status2.selfStartFlag
+        });
+        if (blocked) {
+          lastBlockedReservation = blocked;
+          reservationResult = blocked;
+          record(blocked);
+          refreshDiagnostics();
+          render();
+          return;
+        }
+        lastBlockedReservation = "";
+      }
       try {
         reservation = selectedReservation();
       } catch (error) {
@@ -1294,8 +1387,8 @@
     ...environment(),
     schema: 3,
     buildVersion: "0.1.0",
-    buildRevision: "73cfaad",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T05:31:34.596Z")
+    buildRevision: "983cd99",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T06:43:26.814Z")
   });
   refreshDiagnostics(true);
   render();
@@ -1306,10 +1399,7 @@
     diagnostics.add("restore-auto-start", { remembered: true });
     refreshDiagnostics();
     record("\u5C1D\u8BD5\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\u2026");
-    void client.restore().then((restored) => {
-      if (!restored) record("\u672A\u627E\u5230\u53EF\u6062\u590D\u7684\u8BBE\u5907\uFF0C\u8BF7\u70B9\u51FB\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u624B\u52A8\u8FDE\u63A5\u3002");
-      render();
-    });
+    void reconnectLast("auto");
   } else {
     diagnostics.add("restore-auto-skipped", { reason: !client ? "no-bluetooth-api" : !window.isSecureContext ? "insecure-context" : "no-record" });
     refreshDiagnostics();
