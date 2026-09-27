@@ -515,7 +515,7 @@ export class ChargerClient {
     const bytes = experimentalQueryCommand(pile, gun, query);
     this.diagnose("experimental-query-request", { query, bytes: bytes.length }); // 只记录类别，不记录 VIN、网络资料或设备字段。
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.rejectQuery(new Error("未收到对应设备回报；不能据此判断旧固件不支持，请勿直接重试"), "timeout"), 10000);
+      const timer = setTimeout(() => this.rejectQuery(new Error("未收到对应设备回报"), "timeout"), 10000);
       this.pendingQuery = { query, resolve, reject, timer };
       void this.writeBytes(bytes, `experimental-query-${query}`).catch(error =>
         this.rejectQuery(new Error(`发送 APP 查询报文失败：${message(error)}`), "write-error"));

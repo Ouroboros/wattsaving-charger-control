@@ -93,11 +93,10 @@
       <div class="panel"><h2>本网页预约记录</h2><p class="sub">仅保存设备已确认的本网页预约操作；其他客户端修改、设备离线执行结果无法从本地记录推定。</p><div id="localReserveHistory" aria-live="off">暂无本网页记录</div><p class="footer" id="localHistoryHint">仅存储在此浏览器的网站数据中。</p><button id="localHistoryClear" class="secondary full" type="button">清除此网页的预约记录</button></div>
       </section>
       <section id="tabPanelExperiment" role="tabpanel" aria-labelledby="tabExperiment" style="margin-top:16px" hidden>
-        <div class="notice">APP 查询命令未经旧设备验证，查询名称不能证明对旧固件无副作用。仅在当前连接已授权、且近期收到校验有效的 54 状态时，才允许手动查询；不会自动或定时发送。</div>
-        <div class="panel"><h2>当前设备字段</h2><p class="sub" id="experimentIdentityStatus" role="status" aria-live="polite">等待当前设备有效的 54 通知；不要求手动输入桩编码或枪号。</p><p class="footer">只在内存中用于当前连接，不展示设备标识，不保存或写入诊断日志。没有有效 54 时禁止发送；收到 54 不代表旧固件支持以下命令。</p></div>
+        <div class="panel"><h2>当前设备字段</h2><p class="sub" id="experimentIdentityStatus" role="status" aria-live="polite">等待当前设备 54 通知。</p></div>
         <div class="panel"><h2>APP 独有手动查询</h2><p class="sub">VIN 列表：23 0A 25 [桩编码4字节] [枪号1字节] 66 [校验] → 75（字节 8 为结果码）。4G 信息：23 0A 44 [桩编码4字节] [枪号1字节] 66 [校验] → 94。桩编码与枪号自动从同一设备的有效 54 通知取得。</p>
           <div class="actions"><button id="experimentQueryVin" class="secondary" type="button" disabled>查询 VIN 列表</button><button id="experimentQueryNetwork" class="secondary" type="button" disabled>查询 4G 信息</button></div>
-          <p id="experimentQueryResult" class="sub" role="status" aria-live="polite">尚未发起 APP 查询。</p><p class="footer">两条查询各需点击并确认；只展示是否收到对应的校验有效回报，不显示或保存 VIN、运营商及网络信息。BLE 写入完成 ≠ 设备回报；无回报不能证明不支持。查询可能仍有旧固件未验证的副作用。</p>
+          <p id="experimentQueryResult" class="sub" role="status" aria-live="polite">尚未发起 APP 查询。</p>
         </div>
       </section>
       <section id="tabPanelFeedback" role="tabpanel" aria-labelledby="tabFeedback" style="margin-top:16px" hidden>
@@ -120,6 +119,6 @@
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=app-queries-only-v3"></script>
+  <script defer src="./app.js?v=app-queries-only-v4"></script>
 </body>
 </html>

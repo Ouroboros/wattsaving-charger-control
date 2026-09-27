@@ -239,8 +239,7 @@ function render(): void {
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
   text("experimentQueryResult", experimentQueryResult || "尚未发起 APP 查询。");
   text("experimentIdentityStatus", client?.experimentalIdentityReady ?
-    "已从当前设备校验有效的 54 通知取得桩编码与枪号；不展示、不保存。" :
-    "尚无当前设备近期有效的 54 通知；不可猜测桩编码或枪号，APP 查询暂不可用。");
+    "已从当前设备 54 通知取得查询字段。" : "等待当前设备 54 通知。");
   for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
     el<HTMLButtonElement>(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
   const loginProgress = el("liveLoginProgress");
@@ -342,11 +341,11 @@ for (const [id, query, label, reply] of [
 ] as const satisfies readonly (readonly [string, ExperimentalQuery, string, string])[]) {
   el(id).addEventListener("click", () => {
     if (!client?.experimentalIdentityReady || client.experimentalPending || busy) return;
-    if (!window.confirm(`APP 的 ${label} 查询未在旧设备验证；返回数据可能涉及隐私，本页不展示或保存。\n将使用当前设备 54 通知中的字段，只发送一次并等待 ${reply} 回报；无回报不代表旧固件不支持。继续吗？`)) return;
+    if (!window.confirm(`向当前设备发送「${label}」查询？`)) return;
     busy = true; experimentQueryResult = `${label}查询已请求，等待设备 ${reply} 回报…`; render();
     void client.experimentalQuery(query).then(result => {
-      experimentQueryResult = query === "vin-list" ? result === "accepted" ? "收到设备 75/01 回报；VIN 内容未展示。" :
-        "收到设备 75 回报，但结果码不是 01；VIN 内容未展示。" : "收到设备校验有效的 94 回报；不展示 4G 内容，未判断配置状态。";
+      experimentQueryResult = query === "vin-list" ? result === "accepted" ? "75/01：设备已接受。" :
+        "收到 75 回报，结果码非 01。" : "收到校验有效的 94 回报。";
     }, error => {
       experimentQueryResult = `${label}查询未确认：${errorMessage(error)}`;
       failure(`${label}查询`, error);

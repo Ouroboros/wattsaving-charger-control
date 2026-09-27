@@ -1018,7 +1018,7 @@
       const bytes = experimentalQueryCommand(pile, gun, query);
       this.diagnose("experimental-query-request", { query, bytes: bytes.length });
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => this.rejectQuery(new Error("\u672A\u6536\u5230\u5BF9\u5E94\u8BBE\u5907\u56DE\u62A5\uFF1B\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u65E7\u56FA\u4EF6\u4E0D\u652F\u6301\uFF0C\u8BF7\u52FF\u76F4\u63A5\u91CD\u8BD5"), "timeout"), 1e4);
+        const timer = setTimeout(() => this.rejectQuery(new Error("\u672A\u6536\u5230\u5BF9\u5E94\u8BBE\u5907\u56DE\u62A5"), "timeout"), 1e4);
         this.pendingQuery = { query, resolve, reject, timer };
         void this.writeBytes(bytes, `experimental-query-${query}`).catch((error) => this.rejectQuery(new Error(`\u53D1\u9001 APP \u67E5\u8BE2\u62A5\u6587\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
@@ -1586,7 +1586,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "8b91c07", builtAt: "2026-09-27T19:21:33.725Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "4a50023", builtAt: "2026-09-27T19:26:14.130Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var localStorageAccess;
@@ -1843,7 +1843,7 @@
     el("liveFaultDetail").disabled = !status2;
     text("liveFreshness", !status2 ? "\u5C1A\u672A\u6536\u5230\u8BBE\u5907\u72B6\u6001" : fresh ? "\u8BBE\u5907\u72B6\u6001\uFF1A\u521A\u66F4\u65B0\uFF08\u5B9E\u65F6\u901A\u77E5\uFF09" : "\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF0C\u64CD\u4F5C\u5DF2\u7981\u7528\uFF0C\u8BF7\u5237\u65B0");
     text("experimentQueryResult", experimentQueryResult || "\u5C1A\u672A\u53D1\u8D77 APP \u67E5\u8BE2\u3002");
-    text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 54 \u901A\u77E5\u53D6\u5F97\u6869\u7F16\u7801\u4E0E\u67AA\u53F7\uFF1B\u4E0D\u5C55\u793A\u3001\u4E0D\u4FDD\u5B58\u3002" : "\u5C1A\u65E0\u5F53\u524D\u8BBE\u5907\u8FD1\u671F\u6709\u6548\u7684 54 \u901A\u77E5\uFF1B\u4E0D\u53EF\u731C\u6D4B\u6869\u7F16\u7801\u6216\u67AA\u53F7\uFF0CAPP \u67E5\u8BE2\u6682\u4E0D\u53EF\u7528\u3002");
+    text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u53D6\u5F97\u67E5\u8BE2\u5B57\u6BB5\u3002" : "\u7B49\u5F85\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u3002");
     for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
       el(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
     const loginProgress = el("liveLoginProgress");
@@ -1957,13 +1957,12 @@
   ]) {
     el(id).addEventListener("click", () => {
       if (!client?.experimentalIdentityReady || client.experimentalPending || busy) return;
-      if (!window.confirm(`APP \u7684 ${label} \u67E5\u8BE2\u672A\u5728\u65E7\u8BBE\u5907\u9A8C\u8BC1\uFF1B\u8FD4\u56DE\u6570\u636E\u53EF\u80FD\u6D89\u53CA\u9690\u79C1\uFF0C\u672C\u9875\u4E0D\u5C55\u793A\u6216\u4FDD\u5B58\u3002
-\u5C06\u4F7F\u7528\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u4E2D\u7684\u5B57\u6BB5\uFF0C\u53EA\u53D1\u9001\u4E00\u6B21\u5E76\u7B49\u5F85 ${reply} \u56DE\u62A5\uFF1B\u65E0\u56DE\u62A5\u4E0D\u4EE3\u8868\u65E7\u56FA\u4EF6\u4E0D\u652F\u6301\u3002\u7EE7\u7EED\u5417\uFF1F`)) return;
+      if (!window.confirm(`\u5411\u5F53\u524D\u8BBE\u5907\u53D1\u9001\u300C${label}\u300D\u67E5\u8BE2\uFF1F`)) return;
       busy = true;
       experimentQueryResult = `${label}\u67E5\u8BE2\u5DF2\u8BF7\u6C42\uFF0C\u7B49\u5F85\u8BBE\u5907 ${reply} \u56DE\u62A5\u2026`;
       render();
       void client.experimentalQuery(query).then((result) => {
-        experimentQueryResult = query === "vin-list" ? result === "accepted" ? "\u6536\u5230\u8BBE\u5907 75/01 \u56DE\u62A5\uFF1BVIN \u5185\u5BB9\u672A\u5C55\u793A\u3002" : "\u6536\u5230\u8BBE\u5907 75 \u56DE\u62A5\uFF0C\u4F46\u7ED3\u679C\u7801\u4E0D\u662F 01\uFF1BVIN \u5185\u5BB9\u672A\u5C55\u793A\u3002" : "\u6536\u5230\u8BBE\u5907\u6821\u9A8C\u6709\u6548\u7684 94 \u56DE\u62A5\uFF1B\u4E0D\u5C55\u793A 4G \u5185\u5BB9\uFF0C\u672A\u5224\u65AD\u914D\u7F6E\u72B6\u6001\u3002";
+        experimentQueryResult = query === "vin-list" ? result === "accepted" ? "75/01\uFF1A\u8BBE\u5907\u5DF2\u63A5\u53D7\u3002" : "\u6536\u5230 75 \u56DE\u62A5\uFF0C\u7ED3\u679C\u7801\u975E 01\u3002" : "\u6536\u5230\u6821\u9A8C\u6709\u6548\u7684 94 \u56DE\u62A5\u3002";
       }, (error) => {
         experimentQueryResult = `${label}\u67E5\u8BE2\u672A\u786E\u8BA4\uFF1A${errorMessage(error)}`;
         failure(`${label}\u67E5\u8BE2`, error);
@@ -2252,8 +2251,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "8b91c07",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:21:33.725Z")
+    buildRevision: "4a50023",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:26:14.130Z")
   });
   refreshDiagnostics(true);
   render();

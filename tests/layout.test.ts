@@ -27,6 +27,7 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   const charge = html.slice(html.indexOf('<section id="tabPanelCharge"'), html.indexOf('<section id="tabPanelExperiment"'));
   const experiment = html.slice(html.indexOf('<section id="tabPanelExperiment"'), html.indexOf('<section id="tabPanelFeedback"'));
   assert.doesNotMatch(experiment, /手动实验：功率档位|id="experimentSend"|id="experimentGear"|id="experimentReportedPower"|id="experimentReportedGear"|23 0B 32/);
+  assert.doesNotMatch(experiment, /<div class="notice"|未经旧设备验证|副作用|无回报不能证明/);
   assert.match(experiment, /id="experimentQueryVin"/);
   assert.match(experiment, /id="experimentQueryNetwork"/);
   assert.doesNotMatch(experiment, /id="experimentPile"|id="experimentGun"|id="experimentAutoQuery"/);
