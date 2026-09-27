@@ -24,6 +24,7 @@ const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.is
 let phase = "offline";
 let busy = false;
 let statusAt = 0;
+let staleLoggedFor = 0;
 let reservationResult = "";
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
@@ -111,7 +112,7 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
     if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
-    statusAt = Date.now(); record("收到设备状态通知。");
+    statusAt = Date.now(); staleLoggedFor = 0; record("收到设备状态通知。");
   }
   refreshDiagnostics();
   render();
@@ -124,6 +125,12 @@ function render(): void {
   const device = client?.currentDevice;
   const status = client?.currentStatus ?? null;
   const fresh = !!status && Date.now() - statusAt < 20000;
+  if (client?.authorized && status && !fresh && statusAt && staleLoggedFor !== statusAt) {
+    staleLoggedFor = statusAt;
+    diagnostics.add("status-stale", { ageMs: Date.now() - statusAt, state: status.state,
+      page: document.visibilityState, connected: !!device?.gatt?.connected });
+    refreshDiagnostics();
+  }
   text("liveDevice", device ? `${device.name || "未命名设备"} · ${client?.authorized ? "已授权" : "未授权"}` :
     client?.rememberedName ? `上次设备：${client.rememberedName}（未连接）` : "尚未选择设备");
   text("liveState", client?.authorized ? stateName(status) : "未取得设备实时状态");
@@ -305,13 +312,26 @@ el("clearDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
 resetReservationStart();
-diagnostics.add("app-start", { ...environment(), schema: 3,
+diagnostics.add("app-start", { ...environment(), schema: 4,
   buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeLocal: formatLocalBuildTime(__BUILD_TIME__) });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);
 setInterval(updateReservationCountdown, 1000);
-document.addEventListener("visibilitychange", updateReservationCountdown);
+document.addEventListener("visibilitychange", () => {
+  diagnostics.add("page-visibility", { state: document.visibilityState, connected: !!client?.currentDevice?.gatt?.connected,
+    authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
+  refreshDiagnostics(); updateReservationCountdown();
+});
+window.addEventListener("pagehide", event => {
+  diagnostics.add("page-hide", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
+    authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
+});
+window.addEventListener("pageshow", event => {
+  diagnostics.add("page-show", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
+    authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
+  refreshDiagnostics();
+});
 if (client?.rememberedName && window.isSecureContext) {
   diagnostics.add("restore-auto-start", { remembered: true }); refreshDiagnostics();
   record("尝试恢复上次设备的浏览器授权…");

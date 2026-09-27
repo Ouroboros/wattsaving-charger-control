@@ -256,7 +256,14 @@ test("真实 BLE 生命周期日志覆盖授权、控制与回执且不输出密
   await client.chooseDevice(2);
   await client.login("98765", true); await tick();
   await client.control("start");
+  assert.deepEqual(log.recent.filter(entry => entry.event === "status-transition").map(entry => entry.data.toState), ["2", "4"]);
   client.disconnect();
+  const pageDisconnect = log.recent.find(entry => entry.event === "disconnect" && entry.data.reason === "user");
+  assert.equal(pageDisconnect?.data.lastState, "4");
+  assert.equal(pageDisconnect?.data.phase, "ready");
+  assert.equal(pageDisconnect?.data.page, "unavailable");
+  assert.equal(typeof pageDisconnect?.data.statusAgeMs, "number");
+  assert.equal(log.recent.some(entry => entry.event === "unexpected-disconnect"), false);
   const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
   for (const event of ["chooser-open", "gatt-connected", "service-found", "characteristic-methods", "notifications-start", "notifications-started", "protocol-selected", "auth-request", "auth-reply", "auth-saved", "rx-frame", "status", "tx-attempt", "control-request", "control-confirmed", "disconnect"]) assert.ok(output.includes(event), `missing ${event}`);
   assert.ok(log.recent.some(entry => entry.event === "tx-written" && entry.data.method === "with-response"));
@@ -306,6 +313,8 @@ test("特征不匹配时记录逐服务 UUID 短码和属性，自定义 UUID �
   assert.equal(found[2]?.writeWithoutResponse, true);
   assert.equal(found[2]?.writeResponseMethod, false);
   assert.ok(entries.some(entry => entry.event === "service-unavailable" && entry.data.service === "ff00" && entry.data.reason === "not-found"));
+  assert.ok(entries.some(entry => entry.event === "service-query-finish" && entry.data.service === "ff00" && entry.data.outcome === "missing" && typeof entry.data.durationMs === "number"));
+  assert.ok(entries.some(entry => entry.event === "characteristics-query-finish" && entry.data.service === "ffe5" && entry.data.outcome === "found"));
   assert.ok(entries.some(entry => entry.event === "discovery-missing" && entry.data.notify === false && entry.data.write === false));
   const errorAt = entries.findIndex(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ffe5");
   const disconnectAt = entries.findIndex(entry => entry.event === "disconnect" && entry.data.reason === "connect-error" && entry.data.initiatedBy === "page" && entry.data.connected === true);
@@ -368,6 +377,21 @@ test("服务特征读取失败记录服务代码、错误类别和失败阶段",
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ff00"));
   assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
 });
+test("GATT 建连前失败记录来源、阶段和安全错误类别，不导出设备资料", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  device.gatt.connect = async () => { throw new DOMException("Bluetooth powered off private-device-id", "NetworkError"); };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await assert.rejects(client.chooseDevice(), /powered off/);
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-start" && entry.data.attempt === 1 && entry.data.source === "chooser" && entry.data.lastState === "unavailable"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "gatt" && entry.data.kind === "NetworkError" && entry.data.reason === "bluetooth-off" && typeof entry.data.elapsedMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "connect-error" && entry.data.connected === false && entry.data.lastState === "unavailable"));
+  assert.equal(log.recent.some(entry => entry.event === "gatt-disconnect-call"), false);
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of [device.id, device.name, "Bluetooth powered off private-device-id"]) assert.equal(output.includes(secret), false);
+});
 test("查询服务时断线会中止扫描，不再误报后续服务或特征缺失", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("private-device-id");
@@ -385,14 +409,52 @@ test("查询服务时断线会中止扫描，不再误报后续服务或特征�
   rejectService(new Error("private-device-id service error"));
   await assert.rejects(pending, /连接在服务发现期间已中止/);
   assert.equal(queries, 1);
-  assert.ok(log.recent.some(entry => entry.event === "unexpected-disconnect" && entry.data.stage === "service-ff00" && entry.data.connected === false && typeof entry.data.afterConnectedMs === "number"));
-  assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "gatt-event" && entry.data.initiatedBy === "gatt-event"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-start" && entry.data.attempt === 1 && entry.data.source === "chooser" && entry.data.lastState === "unavailable" && entry.data.page === "unavailable"));
+  assert.ok(log.recent.some(entry => entry.event === "service-query-finish" && entry.data.service === "ff00" && entry.data.outcome === "interrupted" && typeof entry.data.durationMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "unexpected-disconnect" && entry.data.stage === "service-ff00" && entry.data.connected === false && entry.data.lastState === "unavailable" && entry.data.statusAgeMs === null && typeof entry.data.afterConnectedMs === "number" && typeof entry.data.stageMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "disconnect-rx-summary" && entry.data.attempt === 1));
+  assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "gatt-event" && entry.data.initiatedBy === "gatt-event" && entry.data.page === "unavailable"));
   assert.equal(log.recent.some(entry => entry.event === "gatt-disconnect-call"), false);
   assert.ok(log.recent.some(entry => entry.event === "discovery-interrupted" && entry.data.stage === "service-ff00" && entry.data.cause === "gatt-disconnected"));
-  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.reason === "connection-interrupted"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.reason === "connection-interrupted" && entry.data.attempt === 1 && typeof entry.data.elapsedMs === "number"));
   assert.equal(log.recent.some(entry => entry.event === "service-unavailable" || entry.event === "characteristics"), false);
   assert.equal(client.currentDevice, null);
   assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
+});
+test("充电状态下断线和本页重连失败只记录上次状态及耗时，不泄露设备资料", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-charging-device-id");
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2);
+  await client.login("54321", false); await tick();
+  await client.control("start");
+  assert.equal(client.currentStatus?.state, "4");
+  device.writer.writeValueWithResponse = async () => {};
+  const pendingStop = client.control("stop");
+  device.gatt.connected = false;
+  device.dispatchEvent(new Event("gattserverdisconnected"));
+  await assert.rejects(pendingStop, /结果未知/);
+  const disconnect = log.recent.find(entry => entry.event === "unexpected-disconnect");
+  assert.equal(disconnect?.data.phase, "ready");
+  assert.equal(disconnect?.data.lastState, "4");
+  assert.equal(disconnect?.data.pendingControl, true);
+  assert.equal(typeof disconnect?.data.statusAgeMs, "number");
+  assert.ok(log.recent.some(entry => entry.event === "disconnect-rx-summary" && Number(entry.data.statuses) >= 2));
+  let rejectService: (error: Error) => void = () => { throw new Error("服务查询尚未开始"); };
+  device.gatt.getPrimaryService = async () => new Promise((_, reject) => { rejectService = reject; });
+  const retry = client.restore();
+  await tick();
+  device.gatt.connected = false;
+  device.dispatchEvent(new Event("gattserverdisconnected"));
+  rejectService(new Error("private-charging-device-id service failed"));
+  assert.equal(await retry, false);
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-start" && entry.data.attempt === 2 && entry.data.source === "current-page" && entry.data.lastState === "4" && typeof entry.data.statusAgeMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "service-query-finish" && entry.data.attempt === 2 && entry.data.outcome === "interrupted"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.attempt === 2 && entry.data.stage === "service-ff00"));
+  const output = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  for (const secret of [device.id, device.name, "54321", "@%PD-100"]) assert.equal(output.includes(secret), false);
 });
 test("查询特征等待期间断线，即使服务返回结果也不启动通知或误判特征", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();

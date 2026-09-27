@@ -78,6 +78,13 @@ function uuidForm(value: string): string {
   return "other";
 }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function pageVisibility(): string {
+  if (typeof document === "undefined") return "unavailable";
+  return ["visible", "hidden", "prerender"].includes(document.visibilityState) ? document.visibilityState : "other";
+}
+interface StatusTrace {
+  deviceId: string; at: number; state: string; gun: string; mode: string; lock: string;
+}
 function encodeAscii(text: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(new ArrayBuffer(text.length));
   for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
@@ -113,7 +120,11 @@ export class ChargerClient {
   private protocol: Version | null = null;
   private phase: Phase = "offline";
   private connectionStage = "offline";
+  private stageAt = 0;
+  private attempt = 0;
+  private attemptStartedAt = 0;
   private connectedAt = 0;
+  private lastObserved: StatusTrace | null = null; // 仅本页内保留；诊断不导出设备标识。
   private latest: DeviceStatus | null = null;
   private latestAt = 0;
   private pendingAuth: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password: string; remember: boolean } | null = null;
@@ -137,6 +148,12 @@ export class ChargerClient {
   get rememberedName(): string | null {
     const saved = this.loadVault();
     return saved.devices[saved.lastId]?.name ?? null;
+  }
+  private statusTrace(): Record<string, DiagnosticValue> {
+    const observed = this.lastObserved;
+    if (!observed || !this.device?.id || observed.deviceId !== this.device.id) return { lastState: "unavailable", statusAgeMs: null };
+    return { lastState: observed.state, lastGun: observed.gun, lastMode: observed.mode,
+      lastLock: observed.lock, statusAgeMs: Math.max(0, Date.now() - observed.at) };
   }
   private loadVault(): Vault {
     try {
@@ -174,6 +191,7 @@ export class ChargerClient {
   }
   forgetDevice(): void {
     this.disconnect("forget-device");
+    this.lastObserved = null;
     this.recentDevice = null;
     this.storeVault({ lastId: "", devices: {} });
     this.emit({ type: "notice", message: "已清除该网站保存的设备和蓝牙验证码。" });
@@ -189,7 +207,7 @@ export class ChargerClient {
       const inPage = this.recentDevice?.id === id ? this.recentDevice : null;
       if (inPage) {
         this.diagnose("restore-source", { source: "current-page" });
-        await this.connect(inPage);
+        await this.connect(inPage, undefined, "current-page");
         return true;
       }
       if (!this.adapter.getDevices) {
@@ -205,7 +223,7 @@ export class ChargerClient {
         return false;
       }
       this.diagnose("restore-source", { source: "browser-grants" });
-      await this.connect(remembered);
+      await this.connect(remembered, undefined, "browser-grants");
       return true;
     } catch (error) {
       this.diagnose("restore-error", diagnosticError(error), "warn");
@@ -221,17 +239,24 @@ export class ChargerClient {
     catch (error) { this.diagnose("chooser-error", diagnosticError(error), "warn"); throw error; }
     this.diagnose("chooser-selected", { named: !!device.name, hasGatt: !!device.gatt, hasId: !!device.id });
     if (!this.enabled()) return;
-    await this.connect(device, protocol);
+    await this.connect(device, protocol, "chooser");
   }
-  async connect(device: BleDevice, requested?: Version): Promise<void> {
+  async connect(device: BleDevice, requested?: Version, source: "chooser" | "current-page" | "browser-grants" | "direct" = "direct"): Promise<void> {
     if (!this.enabled()) throw new Error("真机控制模式未启用");
     this.disconnect("replace-connection");
     const epoch = this.epoch;
     this.device = device;
-    let stage = "gatt";
+    const attempt = ++this.attempt;
+    const startedAt = Date.now();
+    this.attemptStartedAt = startedAt;
+    let stage = "gatt", stageAt = startedAt;
     this.connectionStage = stage;
-    const markStage = (next: string): void => { stage = next; if (epoch === this.epoch) this.connectionStage = next; };
-    this.diagnose("gatt-connect-start");
+    this.stageAt = stageAt;
+    const markStage = (next: string): void => {
+      stage = next; stageAt = Date.now();
+      if (epoch === this.epoch) { this.connectionStage = next; this.stageAt = stageAt; }
+    };
+    this.diagnose("gatt-connect-start", { attempt, source, page: pageVisibility(), ...this.statusTrace() });
     this.setPhase("connecting", `正在连接 ${device.name || "未命名设备"}…`);
     try {
       if (!device.gatt) throw new Error("设备不提供 GATT 服务");
@@ -248,7 +273,7 @@ export class ChargerClient {
       if (!server.connected) throw new ConnectionInterruptedError();
       this.server = server;
       this.connectedAt = Date.now();
-      this.diagnose("gatt-connected");
+      this.diagnose("gatt-connected", { attempt, connectMs: Date.now() - startedAt, page: pageVisibility() });
       this.diagnose("auth-gate", { stage: "await-characteristics" });
       this.rememberConnectedDevice(device);
       device.addEventListener("gattserverdisconnected", this.onDisconnected);
@@ -257,7 +282,8 @@ export class ChargerClient {
         const cause = !server.connected ? "gatt-disconnected" : epoch !== this.epoch ? "session-ended" :
           !this.enabled() ? "control-disabled" : "server-replaced";
         const original = originalError === undefined ? null : diagnosticError(originalError);
-        this.diagnose("discovery-interrupted", { stage, operation, cause, connected: server.connected,
+        this.diagnose("discovery-interrupted", { attempt, stage, operation, cause, connected: server.connected,
+          stageMs: Math.max(0, Date.now() - stageAt),
           ...(original ? { operationKind: original.kind, operationReason: original.reason } : {}) }, "warn");
         throw new ConnectionInterruptedError();
       };
@@ -268,28 +294,44 @@ export class ChargerClient {
       for (const uuid of SERVICES) {
         const serviceCode = uuid.slice(4, 8);
         markStage(`service-${serviceCode}`);
-        this.diagnose("service-query-start", { service: serviceCode });
+        this.diagnose("service-query-start", { attempt, service: serviceCode, connected: server.connected });
+        const queryAt = Date.now();
         let service: BleService;
         try { service = await server.getPrimaryService(uuid); }
         catch (error) {
-          ensureActive("get-service", error);
           const details = diagnosticError(error);
+          const interrupted = !server.connected || epoch !== this.epoch;
+          this.diagnose("service-query-finish", { attempt, service: serviceCode,
+            outcome: interrupted ? "interrupted" : details.reason === "not-found" ? "missing" : "failed",
+            durationMs: Date.now() - queryAt, connected: server.connected }, interrupted ? "warn" : "info");
+          ensureActive("get-service", error);
           if (details.reason === "not-found") missingServices++; else failedServices++;
           this.diagnose("service-unavailable", { service: serviceCode, ...details }, details.reason === "not-found" ? "info" : "warn");
           continue;
         }
+        this.diagnose("service-query-finish", { attempt, service: serviceCode,
+          outcome: server.connected && epoch === this.epoch ? "found" : "interrupted",
+          durationMs: Date.now() - queryAt, connected: server.connected });
         ensureActive("get-service");
         servicesFound++;
         this.diagnose("service-found", { service: serviceCode });
         markStage(`characteristics-${serviceCode}`);
-        this.diagnose("characteristics-query-start", { service: serviceCode });
+        this.diagnose("characteristics-query-start", { attempt, service: serviceCode, connected: server.connected });
+        const characteristicsAt = Date.now();
         let characteristics: BleCharacteristic[];
         try { characteristics = await service.getCharacteristics(); }
         catch (error) {
+          const interrupted = !server.connected || epoch !== this.epoch;
+          this.diagnose("characteristics-query-finish", { attempt, service: serviceCode,
+            outcome: interrupted ? "interrupted" : "failed", durationMs: Date.now() - characteristicsAt,
+            connected: server.connected }, "warn");
           ensureActive("get-characteristics", error);
           this.diagnose("characteristics-error", { service: serviceCode, ...diagnosticError(error) }, "warn");
           throw error;
         }
+        this.diagnose("characteristics-query-finish", { attempt, service: serviceCode,
+          outcome: server.connected && epoch === this.epoch ? "found" : "interrupted",
+          durationMs: Date.now() - characteristicsAt, connected: server.connected });
         ensureActive("get-characteristics");
         this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
         for (const [index, characteristic] of characteristics.entries()) {
@@ -343,12 +385,13 @@ export class ChargerClient {
       this.notifier = notifier;
       notifier.addEventListener("characteristicvaluechanged", this.listener);
       markStage("notifications");
-      this.diagnose("notifications-start", { notify: !!notifier.properties?.notify, indicate: !!notifier.properties?.indicate });
+      this.diagnose("notifications-start", { attempt, notify: !!notifier.properties?.notify, indicate: !!notifier.properties?.indicate });
+      const notificationsAt = Date.now();
       try { await notifier.startNotifications(); }
       catch (error) { ensureActive("start-notifications", error); this.diagnose("notifications-error", diagnosticError(error), "error"); throw error; }
       ensureActive("start-notifications");
       markStage("connected");
-      this.diagnose("notifications-started");
+      this.diagnose("notifications-started", { attempt, durationMs: Date.now() - notificationsAt });
       if (!this.protocol) { this.diagnose("auth-gate", { stage: "await-protocol" }); this.setPhase("detecting", "已连接，等待设备报文以辨识协议…"); }
       if (!this.protocol && requested) this.chooseProtocol(requested, "用户指定");
       else if (!this.protocol) this.sniffTimer = setTimeout(() => {
@@ -359,7 +402,9 @@ export class ChargerClient {
         else { this.diagnose("auth-gate", { stage: "await-manual-protocol" }); this.setPhase("password", "没有收到协议报文；请手动选择旧版或新版协议，再输入密码。"); this.emit({ type: "auth-needed", message: "请选协议并输入五位蓝牙验证码。" }); }
       }, 5000);
     } catch (error) {
-      this.diagnose("gatt-connect-error", { stage, ...diagnosticError(error) }, "error");
+      this.diagnose("gatt-connect-error", { attempt, stage, elapsedMs: Date.now() - startedAt,
+        stageMs: Math.max(0, Date.now() - stageAt), page: pageVisibility(), connected: !!device.gatt?.connected,
+        ...diagnosticError(error) }, "error");
       if (epoch === this.epoch) { this.disconnect("connect-error"); this.emit({ type: "notice", message: `连接失败：${message(error)}` }); }
       throw error;
     }
@@ -534,8 +579,15 @@ export class ChargerClient {
         this.diagnose("status", { version: frame.protocol, state: frame.state, gun: frame.gunFlag,
           mode: frame.mode, lock: frame.lock, selfStart: frame.selfStartFlag, samples: this.statusFrames });
       }
+      if (signature !== this.lastStatusSignature) {
+        this.diagnose("status-transition", { attempt: this.attempt, fromState: this.latest?.state ?? "none", toState: frame.state,
+          fromMode: this.latest?.mode ?? "none", toMode: frame.mode, gun: frame.gunFlag, lock: frame.lock,
+          sincePreviousMs: this.latestAt ? Math.max(0, Date.now() - this.latestAt) : null });
+      }
       this.lastStatusSignature = signature;
       this.latest = frame; this.latestAt = Date.now();
+      if (this.device?.id) this.lastObserved = { deviceId: this.device.id, at: this.latestAt,
+        state: frame.state, gun: frame.gunFlag, mode: frame.mode, lock: frame.lock };
       this.emit({ type: "status", status: frame });
       const action = this.pendingControl?.action;
       if (action === "start" && frame.state === "4" || action === "stop" && frame.state === "2" || action === "unlock" && frame.lock === "0") this.confirmControl();
@@ -567,12 +619,22 @@ export class ChargerClient {
     }
   }
   private readonly onDisconnected = (): void => {
-    this.diagnose("unexpected-disconnect", { stage: this.connectionStage, connected: !!this.server?.connected,
-      afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null }, "warn");
+    this.diagnose("unexpected-disconnect", { attempt: this.attempt, stage: this.connectionStage, phase: this.phase,
+      page: pageVisibility(), connected: !!this.server?.connected,
+      afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null,
+      stageMs: this.stageAt ? Math.max(0, Date.now() - this.stageAt) : null,
+      ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
+      pendingReservation: !!this.pendingReservation, notifications: this.rxNotifications }, "warn");
+    this.diagnose("disconnect-rx-summary", { attempt: this.attempt, notifications: this.rxNotifications,
+      totalBytes: this.rxBytes, parsed: this.decodedFrames, unknown: this.unknownFrames, statuses: this.statusFrames });
     this.disconnect("gatt-event");
     this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" });
   };
   disconnect(reason: "user" | "replace-connection" | "connect-error" | "gatt-event" | "forget-device" = "user"): void {
+    const context = { attempt: this.attempt, phase: this.phase, page: pageVisibility(),
+      afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null,
+      ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
+      pendingReservation: !!this.pendingReservation };
     this.epoch++;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
     this.sniffTimer = null;
@@ -580,7 +642,8 @@ export class ChargerClient {
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"), "disconnect");
     this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"), "disconnect");
     const server = this.server;
-    if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page", connected: !!server?.connected, stage: this.connectionStage });
+    if (this.device || server) this.diagnose("disconnect", { reason, initiatedBy: reason === "gatt-event" ? "gatt-event" : "page",
+      connected: !!server?.connected, stage: this.connectionStage, ...context });
     this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
     if (this.notifier && this.listener) this.notifier.removeEventListener("characteristicvaluechanged", this.listener);
     this.device = null; this.server = null; this.writer = null; this.notifier = null; this.listener = null;
@@ -593,7 +656,7 @@ export class ChargerClient {
     this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset();
     this.rxNotifications = 0; this.rxBytes = 0; this.decodedFrames = 0; this.unknownFrames = 0;
     this.statusFrames = 0; this.lastStatusSignature = "";
-    this.connectionStage = "offline"; this.connectedAt = 0;
+    this.connectionStage = "offline"; this.stageAt = 0; this.connectedAt = 0;
     this.setPhase("offline", "未连接充电桩");
   }
 }
