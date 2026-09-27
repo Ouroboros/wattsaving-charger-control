@@ -117,6 +117,7 @@ export class ChargerClient {
   private epoch = 0;
   private sniffTimer: ReturnType<typeof setTimeout> | null = null;
   private autoLoginTried = false;
+  private autoLoginInProgress = false;
   private protocol: Version | null = null;
   private phase: Phase = "offline";
   private connectionStage = "offline";
@@ -144,6 +145,7 @@ export class ChargerClient {
   get currentProtocol(): Version | null { return this.protocol; }
   get currentStatus(): DeviceStatus | null { return this.latest; }
   get authorized(): boolean { return this.phase === "ready" && !!this.server?.connected; }
+  get automaticLoginPending(): boolean { return this.autoLoginInProgress && this.phase === "authenticating"; }
   get reservationPending(): boolean { return !!this.pendingReservation; }
   get canCancelReservation(): boolean { return this.reservationAccepted === null ? this.latest?.mode === "3" : this.reservationAccepted; }
   get rememberedName(): string | null {
@@ -430,13 +432,18 @@ export class ChargerClient {
       this.diagnose("auth-gate", { stage: "cached-password" });
       this.diagnose("auth-cached-available");
       this.autoLoginTried = true;
-      void this.login(saved.password, true).catch(error => {
-        this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
-        this.forgetPassword();
-        this.setPhase("password", `自动授权失败：${message(error)}`);
-        this.emit({ type: "notice", message: "自动授权失败，请重新输入蓝牙验证码。", severity: "error" });
-        this.emit({ type: "auth-needed", message: "请重新输入蓝牙验证码。" });
-      });
+      this.autoLoginInProgress = true;
+      void this.login(saved.password, true).then(
+        () => { this.autoLoginInProgress = false; },
+        error => {
+          this.autoLoginInProgress = false;
+          this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
+          this.forgetPassword();
+          this.setPhase("password", `自动授权失败：${message(error)}`);
+          this.emit({ type: "notice", message: "自动授权失败，请重新输入蓝牙验证码。", severity: "error" });
+          this.emit({ type: "auth-needed", message: "请重新输入蓝牙验证码。" });
+        }
+      );
     } else {
       this.diagnose("auth-gate", { stage: "await-password-input" });
       this.setPhase("password", "请输入五位蓝牙验证码；首次通过后可保存并自动输入。");
@@ -647,6 +654,7 @@ export class ChargerClient {
       ...this.statusTrace(), pendingAuth: !!this.pendingAuth, pendingControl: !!this.pendingControl,
       pendingReservation: !!this.pendingReservation };
     this.epoch++;
+    this.autoLoginInProgress = false;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
     this.sniffTimer = null;
     this.rejectAuth(new Error("蓝牙连接已断开"), "disconnect");

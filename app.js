@@ -340,6 +340,7 @@
       __publicField(this, "epoch", 0);
       __publicField(this, "sniffTimer", null);
       __publicField(this, "autoLoginTried", false);
+      __publicField(this, "autoLoginInProgress", false);
       __publicField(this, "protocol", null);
       __publicField(this, "phase", "offline");
       __publicField(this, "connectionStage", "offline");
@@ -405,6 +406,9 @@
     }
     get authorized() {
       return this.phase === "ready" && !!this.server?.connected;
+    }
+    get automaticLoginPending() {
+      return this.autoLoginInProgress && this.phase === "authenticating";
     }
     get reservationPending() {
       return !!this.pendingReservation;
@@ -801,13 +805,20 @@
         this.diagnose("auth-gate", { stage: "cached-password" });
         this.diagnose("auth-cached-available");
         this.autoLoginTried = true;
-        void this.login(saved.password, true).catch((error) => {
-          this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
-          this.forgetPassword();
-          this.setPhase("password", `\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF1A${message(error)}`);
-          this.emit({ type: "notice", message: "\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002", severity: "error" });
-          this.emit({ type: "auth-needed", message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
-        });
+        this.autoLoginInProgress = true;
+        void this.login(saved.password, true).then(
+          () => {
+            this.autoLoginInProgress = false;
+          },
+          (error) => {
+            this.autoLoginInProgress = false;
+            this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
+            this.forgetPassword();
+            this.setPhase("password", `\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF1A${message(error)}`);
+            this.emit({ type: "notice", message: "\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002", severity: "error" });
+            this.emit({ type: "auth-needed", message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
+          }
+        );
       } else {
         this.diagnose("auth-gate", { stage: "await-password-input" });
         this.setPhase("password", "\u8BF7\u8F93\u5165\u4E94\u4F4D\u84DD\u7259\u9A8C\u8BC1\u7801\uFF1B\u9996\u6B21\u901A\u8FC7\u540E\u53EF\u4FDD\u5B58\u5E76\u81EA\u52A8\u8F93\u5165\u3002");
@@ -1070,6 +1081,7 @@
         pendingReservation: !!this.pendingReservation
       };
       this.epoch++;
+      this.autoLoginInProgress = false;
       if (this.sniffTimer) clearTimeout(this.sniffTimer);
       this.sniffTimer = null;
       this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"), "disconnect");
@@ -1208,7 +1220,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "ae7c8e7", builtAt: "2026-09-27T08:50:08.417Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "f2973df", builtAt: "2026-09-27T08:54:16.282Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1378,7 +1390,10 @@
     text("liveMinutes", status2 && Number.isFinite(status2.minutes) ? `${status2.minutes} min` : "--");
     text("liveElectrical", status2 ? `\u7535\u538B ${status2.voltage} V \xB7 \u7535\u6D41 ${status2.currentA ?? "--"} A \xB7 \u529F\u7387\u539F\u503C ${status2.power}\uFF08\u5355\u4F4D\u672A\u6838\u5B9E\uFF09` : "\u65E0\u8BBE\u5907\u6570\u636E");
     text("liveFreshness", !status2 ? "\u5C1A\u672A\u6536\u5230\u8BBE\u5907\u72B6\u6001" : fresh ? "\u8BBE\u5907\u72B6\u6001\uFF1A\u521A\u66F4\u65B0\uFF08\u5B9E\u65F6\u901A\u77E5\uFF09" : "\u8BBE\u5907\u72B6\u6001\u5DF2\u8FC7\u671F\uFF0C\u64CD\u4F5C\u5DF2\u7981\u7528\uFF0C\u8BF7\u5237\u65B0");
-    el("liveAuthBox").hidden = !device || !!client?.authorized;
+    const loginProgress = el("liveLoginProgress");
+    loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
+    if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "\u6B63\u5728\u81EA\u52A8\u767B\u5F55\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026" : "\u6B63\u5728\u9A8C\u8BC1\u9A8C\u8BC1\u7801\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026");
+    el("liveAuthBox").hidden = !device || phase !== "password" || !!client?.authorized;
     el("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
     el("liveStart").disabled = !client?.authorized || !fresh || busy;
     el("liveStop").disabled = !client?.authorized || !fresh || busy || status2?.state !== "4";
@@ -1659,8 +1674,8 @@
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "ae7c8e7",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:50:08.417Z")
+    buildRevision: "f2973df",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:54:16.282Z")
   });
   refreshDiagnostics(true);
   render();

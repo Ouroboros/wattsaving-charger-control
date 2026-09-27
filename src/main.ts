@@ -166,7 +166,10 @@ function render(): void {
   text("liveMinutes", status && Number.isFinite(status.minutes) ? `${status.minutes} min` : "--");
   text("liveElectrical", status ? `电压 ${status.voltage} V · 电流 ${status.currentA ?? "--"} A · 功率原值 ${status.power}（单位未核实）` : "无设备数据");
   text("liveFreshness", !status ? "尚未收到设备状态" : fresh ? "设备状态：刚更新（实时通知）" : "设备状态已过期，操作已禁用，请刷新");
-  el("liveAuthBox").hidden = !device || !!client?.authorized;
+  const loginProgress = el("liveLoginProgress");
+  loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
+  if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "正在自动登录，等待设备确认…" : "正在验证验证码，等待设备确认…");
+  el("liveAuthBox").hidden = !device || phase !== "password" || !!client?.authorized;
   el<HTMLButtonElement>("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
   el<HTMLButtonElement>("liveStart").disabled = !client?.authorized || !fresh || busy;
   el<HTMLButtonElement>("liveStop").disabled = !client?.authorized || !fresh || busy || status?.state !== "4";

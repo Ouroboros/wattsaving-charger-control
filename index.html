@@ -56,6 +56,7 @@
         <div class="actions"><button id="liveRestore" class="primary" type="button" disabled>一键连接上次设备</button><button id="liveChoose" class="secondary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
         <small>协议：<span id="liveProtocolName">等待识别</span>。本页断线后可直接重连；重新打开页面后须由 Bluefy 的 getDevices() 返回已授权设备，否则浏览器规定必须重新选择授权。</small>
       </div>
+      <div class="notice light" id="liveLoginProgress" role="status" aria-live="polite" style="margin-bottom:16px" hidden>正在授权…</div>
       <div class="panel" id="liveAuthBox" hidden><h2>设备蓝牙验证码</h2><label for="livePassword">五位验证码</label><input id="livePassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off" placeholder="仅发送给所选 BLE 设备">
         <label class="check"><input id="rememberPassword" type="checkbox" checked>验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
         <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
@@ -97,6 +98,6 @@
       </section>
     </div>
   </section></main>
-  <script defer src="./app.js?v=bluetooth-warning-only-v1"></script>
+  <script defer src="./app.js?v=auto-login-progress-v1"></script>
 </body>
 </html>
