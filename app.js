@@ -1450,104 +1450,6 @@
     }
   };
 
-  // src/history.ts
-  var KEY3 = "wattsaving-local-history-v1";
-  var LIMIT = 100;
-  var empty = () => ({ reservations: [] });
-  var finiteTime = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
-  var deviceRecord = (v) => !!v && typeof v === "object" && typeof v.id === "string" && typeof v.deviceId === "string";
-  var LocalHistory = class {
-    constructor(storage) {
-      this.storage = storage;
-      __publicField(this, "data", empty());
-      __publicField(this, "lastLive", /* @__PURE__ */ new Map());
-      __publicField(this, "available");
-      let available = !!storage;
-      let needsMigration = false;
-      try {
-        const raw = storage?.getItem(KEY3);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed && typeof parsed === "object") {
-            const obj = parsed;
-            this.data.reservations = Array.isArray(obj.reservations) ? obj.reservations.filter(deviceRecord).slice(0, LIMIT) : [];
-            needsMigration = "charges" in obj;
-          }
-        }
-      } catch {
-        available = false;
-        this.data = empty();
-      }
-      if (needsMigration) {
-        try {
-          storage?.setItem(KEY3, JSON.stringify(this.data));
-        } catch {
-          available = false;
-        }
-      }
-      this.available = available;
-    }
-    save() {
-      try {
-        this.storage?.setItem(KEY3, JSON.stringify(this.data));
-      } catch {
-      }
-    }
-    reservations(deviceId) {
-      return this.data.reservations.filter((r) => r.deviceId === deviceId);
-    }
-    latestDeviceId() {
-      return this.data.reservations[0]?.deviceId || null;
-    }
-    latestReservation(deviceId) {
-      return this.reservations(deviceId).find((r) => ["accepted", "observed", "charging"].includes(r.state) && finiteTime(r.startsAt));
-    }
-    trackStatus(deviceId, status2, now = Date.now()) {
-      const previous = this.lastLive.get(deviceId);
-      this.lastLive.set(deviceId, status2.state);
-      let changed = false;
-      const reservation = this.latestReservation(deviceId);
-      if (reservation) {
-        let state = reservation.state;
-        if (status2.mode === "3" && status2.state !== "4" && state === "accepted") state = "observed";
-        if (status2.state === "4" && state === "observed") state = "charging";
-        if (status2.state !== "4" && state === "charging" && previous === "4") state = "ended";
-        if (state !== reservation.state) {
-          reservation.state = state;
-          reservation.updatedAt = now;
-          changed = true;
-        }
-      }
-      if (changed) this.save();
-    }
-    acceptReservation(deviceId, startsAt, end, now = Date.now()) {
-      const previous = this.latestReservation(deviceId);
-      if (previous) {
-        previous.state = "replaced";
-        previous.updatedAt = now;
-      }
-      const label = end.kind === "full" ? "\u81EA\u52A8\u5145\u6EE1" : end.kind === "time" ? `${end.minutes / 60} \u5C0F\u65F6` : `${end.kWh} \u5EA6`;
-      this.data.reservations.unshift({ id: String(now), deviceId, submittedAt: now, startsAt, end: label, state: "accepted", updatedAt: now });
-      this.data.reservations = this.data.reservations.slice(0, LIMIT);
-      this.save();
-    }
-    cancelReservation(deviceId, now = Date.now()) {
-      const reservation = this.latestReservation(deviceId);
-      if (!reservation) return;
-      reservation.state = "cancelled";
-      reservation.updatedAt = now;
-      this.save();
-    }
-    clear() {
-      this.data = empty();
-      this.lastLive.clear();
-      try {
-        this.storage?.removeItem(KEY3);
-      } catch {
-      }
-    }
-  };
-
   // src/tabs.ts
   function showTab(pairs, selected) {
     if (selected < 0 || selected >= pairs.length) throw new RangeError("\u672A\u77E5\u6807\u7B7E\u9875");
@@ -1586,15 +1488,13 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "f8f9874", builtAt: "2026-09-27T19:30:37.882Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "7f3df2c", builtAt: "2026-09-27T19:43:16.901Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
-  var localStorageAccess;
   try {
-    localStorageAccess = window.localStorage;
+    window.localStorage.removeItem("wattsaving-local-history-v1");
   } catch {
   }
-  var history = new LocalHistory(localStorageAccess);
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
     diagnostics.add(event, data, level);
     refreshDiagnostics();
@@ -1616,33 +1516,6 @@
   var pad4 = (value) => String(value).padStart(2, "0");
   function localMinute(date) {
     return `${date.getFullYear()}-${pad4(date.getMonth() + 1)}-${pad4(date.getDate())}T${pad4(date.getHours())}:${pad4(date.getMinutes())}`;
-  }
-  function formatHistoryTime(value) {
-    return value && Number.isFinite(value) ? new Date(value).toLocaleString("zh-CN") : "\u672A\u77E5";
-  }
-  function renderHistory() {
-    const id = client?.currentDevice?.id || history.latestDeviceId();
-    const reservations = id ? history.reservations(id) : [];
-    const show = (boxId, entries) => {
-      const box = el(boxId);
-      box.replaceChildren();
-      if (!entries.length) {
-        box.textContent = "\u6682\u65E0\u672C\u7F51\u9875\u8BB0\u5F55";
-        return;
-      }
-      const list = document.createElement("ol");
-      list.className = "history-list";
-      for (const entry of entries) {
-        const item = document.createElement("li");
-        item.textContent = entry;
-        list.append(item);
-      }
-      box.append(list);
-    };
-    const names = { accepted: "\u8BBE\u5907\u5DF2\u63A5\u53D7\uFF0C\u5F85\u6838\u5BF9\u6A21\u5F0F", observed: "\u66FE\u89C2\u5BDF\u5230\u9884\u7EA6\u6A21\u5F0F", charging: "\u540E\u7EED\u89C2\u5BDF\u5230\u5145\u7535\u4E2D", ended: "\u540E\u7EED\u89C2\u5BDF\u5230\u505C\u6B62\u5145\u7535", cancelled: "\u8BBE\u5907\u5DF2\u786E\u8BA4\u53D6\u6D88", replaced: "\u88AB\u672C\u7F51\u9875\u65B0\u9884\u7EA6\u66FF\u6362" };
-    show("localReserveHistory", reservations.map((r) => `\u63D0\u4EA4\uFF1A${formatHistoryTime(r.submittedAt)} \xB7 \u9884\u7EA6\uFF1A${formatHistoryTime(r.startsAt)}
-\u7ED3\u675F\u65B9\u5F0F\uFF1A${r.end} \xB7 \u672C\u5730\u8BB0\u5F55\uFF1A${names[r.state] || "\u72B6\u6001\u672A\u77E5"}`));
-    text("localHistoryHint", history.available ? "\u4EC5\u5B58\u50A8\u5728\u6B64\u6D4F\u89C8\u5668\u7684\u7F51\u7AD9\u6570\u636E\u4E2D\u3002" : "\u6D4F\u89C8\u5668\u7981\u6B62\u672C\u5730\u5B58\u50A8\uFF1B\u8BB0\u5F55\u4EC5\u5728\u672C\u6B21\u9875\u9762\u6709\u6548\u3002");
   }
   function resetReservationStart() {
     reservationStartAutomatic = true;
@@ -1681,7 +1554,7 @@
     }
     box.hidden = false;
     text("reserveCountdown", countdownTo(confirmedReservation.startsAt, now));
-    text("reserveCountdownLabel", now < confirmedReservation.startsAt ? confirmedReservation.source === "restored" ? "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u4EC5\u672C\u5730\u8BB0\u5F55\uFF1B\u8BBE\u5907\u65F6\u95F4\u4E0D\u53EF\u6838\u5BF9\uFF09" : "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u672C\u5730\u65F6\u949F\u4F30\u7B97\uFF09" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u5230\uFF0C\u7B49\u5F85\u8BBE\u5907\u72B6\u6001\u786E\u8BA4");
+    text("reserveCountdownLabel", now < confirmedReservation.startsAt ? "\u540E\u5F00\u59CB\u5145\u7535\uFF08\u672C\u5730\u65F6\u949F\u4F30\u7B97\uFF09" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u5230\uFF0C\u7B49\u5F85\u8BBE\u5907\u72B6\u6001\u786E\u8BA4");
   }
   function environment() {
     const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" : ["localhost", "127.0.0.1"].includes(location.hostname) ? "localhost" : "other";
@@ -1785,14 +1658,6 @@
     if (event.type === "protocol") record(`\u534F\u8BAE\uFF1A${event.version === 1 ? "\u65E7\u7248" : "\u65B0\u7248"}\uFF08${event.source}\uFF09`);
     if (event.type === "auth-needed") record(event.message);
     if (event.type === "status") {
-      const deviceId = client?.currentDevice?.id;
-      if (deviceId) {
-        history.trackStatus(deviceId, event.status);
-        const saved = history.latestReservation(deviceId);
-        if (event.status.mode === "3" && saved && (!confirmedReservation || confirmedReservation.deviceId !== deviceId)) {
-          confirmedReservation = { deviceId, startsAt: saved.startsAt, source: "restored" };
-        }
-      }
       if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
       statusAt = Date.now();
       staleLoggedFor = 0;
@@ -1885,7 +1750,6 @@
     reserveInput.max = localMinute(new Date(Date.now() + 24 * 60 * 60 * 1e3));
     text("reserveState", !client?.authorized ? "\u8FDE\u63A5\u5E76\u6388\u6743\u540E\u53EF\u9884\u7EA6\u3002" : client.reservationPending ? "\u6307\u4EE4\u5DF2\u53D1\u9001\uFF0C\u7B49\u5F85\u8BBE\u5907\u9884\u7EA6\u56DE\u6267\uFF1B\u6B64\u65F6\u52FF\u91CD\u590D\u63D0\u4EA4\u3002" : reservationResult || !fresh ? reservationResult || "\u7B49\u5F85\u6700\u65B0\u8BBE\u5907\u72B6\u6001\uFF0C\u64CD\u4F5C\u6682\u4E0D\u53EF\u7528\u3002" : status2?.mode === "3" ? "\u8BBE\u5907\u901A\u77E5\u663E\u793A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u4FEE\u6539\u6216\u53D6\u6D88\u3002" : reservationBlocked ? reservationBlocked : client.canCancelReservation ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u63D0\u4EA4\uFF0C\u5C1A\u5F85\u65B0\u7684\u9884\u7EA6\u6A21\u5F0F\u72B6\u6001\u901A\u77E5\u3002" : "\u8BBE\u5907\u672A\u62A5\u544A\u9884\u7EA6\u6A21\u5F0F\uFF1B\u53EF\u8BBE\u7F6E\u65B0\u7684\u9884\u7EA6\u3002");
     updateReservationCountdown();
-    renderHistory();
   }
   function selectedProtocol() {
     const value = el("liveProtocol").value;
@@ -2072,13 +1936,11 @@
       if (action === "submit") {
         await client.submitReservation(reservation);
         if (deviceId && client.currentDevice?.id === deviceId) {
-          confirmedReservation = { deviceId, startsAt: reservation.start.getTime(), source: "session" };
-          history.acceptReservation(deviceId, reservation.start.getTime(), reservation.end);
+          confirmedReservation = { deviceId, startsAt: reservation.start.getTime() };
         }
       } else {
         await client.cancelReservation();
         if (confirmedReservation?.deviceId === deviceId) confirmedReservation = null;
-        if (deviceId) history.cancelReservation(deviceId);
       }
       reservationResult = `\u8BBE\u5907\u5DF2\u786E\u8BA4${label}\uFF1B\u8BF7\u6838\u5BF9\u8BBE\u5907\u5F53\u524D\u9884\u7EA6\u72B6\u6001\u3002`;
       record(reservationResult);
@@ -2172,18 +2034,11 @@ ${faultAdvice(status2)}
     render();
   });
   el("liveForgetDevice").addEventListener("click", () => {
-    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u8BB0\u5F55\u3001\u9A8C\u8BC1\u7801\u53CA\u5168\u90E8\u672C\u5730\u9884\u7EA6\u8BB0\u5F55\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
+    if (!window.confirm("\u6E05\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u8BB0\u5F55\u548C\u9A8C\u8BC1\u7801\uFF0C\u5E76\u65AD\u5F00\u8FDE\u63A5\uFF1F")) return;
     client?.forgetDevice();
-    history.clear();
     statusAt = 0;
     confirmedReservation = null;
     diagnostics.add("device-records-forgotten");
-    render();
-  });
-  el("localHistoryClear").addEventListener("click", () => {
-    if (!window.confirm("\u786E\u5B9A\u5220\u9664\u6B64\u6D4F\u89C8\u5668\u4E2D\u6240\u6709\u8BBE\u5907\u7684\u672C\u7F51\u9875\u9884\u7EA6\u8BB0\u5F55\uFF1F\u65E0\u6CD5\u6062\u590D\u3002")) return;
-    history.clear();
-    confirmedReservation = null;
     render();
   });
   el("copyDiagnostics").addEventListener("click", async () => {
@@ -2251,8 +2106,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "f8f9874",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:30:37.882Z")
+    buildRevision: "7f3df2c",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:43:16.901Z")
   });
   refreshDiagnostics(true);
   render();

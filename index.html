@@ -38,7 +38,6 @@
     .reserve-countdown { margin:14px 0; border:1px solid #bddec9; border-radius:12px; padding:14px; background:var(--soft); color:#174e3c; text-align:center; }
     .reserve-countdown strong { display:block; font-variant-numeric:tabular-nums; font-size:1.65rem; line-height:1.25; }
     .reserve-countdown span,.reserve-countdown small { display:block; margin:4px 0 0; } .reserve-countdown small { color:#45645a; }
-    .history-list { margin:10px 0; padding-left:21px; } .history-list li { padding:9px 0; border-bottom:1px solid var(--line); white-space:pre-line; overflow-wrap:anywhere; font-size:.85rem; line-height:1.5; }
     @media(max-width:760px) { main { padding:0 12px; } .screen { padding-left:16px; padding-right:16px; } .tabs { padding:8px 8px calc(8px + env(safe-area-inset-bottom)); gap:2px; } .tab { font-size:.82rem; padding:10px 2px; } .metrics { gap:5px; } .metric { padding:8px; } }
   </style>
 </head>
@@ -58,7 +57,7 @@
         <label class="check"><input id="rememberPassword" type="checkbox" checked>验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
         <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
       </div>
-      <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备及本地历史</button></div></div>
+      <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
       <div class="panel" id="adminPanel" hidden><h2>权限管理</h2><p class="sub">需独立管理员验证码并获得设备回执；不是蓝牙连接验证码。管理员验证码不保存在网页。</p>
         <div id="adminAuthBox"><label for="adminPassword">五位管理员验证码</label><input id="adminPassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off"><button id="adminLogin" class="primary full" type="button">管理员认证</button></div>
         <div id="adminControls" hidden>
@@ -86,11 +85,10 @@
         <div id="reserveTimeBox" hidden><label for="reserveHours">预约充电时长</label><select id="reserveHours"><option value="1">1 小时</option><option value="2">2 小时</option><option value="3">3 小时</option><option value="4">4 小时</option><option value="5">5 小时</option><option value="6">6 小时</option><option value="7">7 小时</option><option value="8">8 小时</option><option value="9">9 小时</option><option value="10">10 小时</option><option value="11">11 小时</option><option value="12">12 小时</option></select></div>
         <div id="reserveEnergyBox" hidden><label for="reserveEnergy">预约充电电量</label><select id="reserveEnergy"><option value="5">5 度</option><option value="10">10 度</option><option value="15">15 度</option><option value="20">20 度</option><option value="25">25 度</option><option value="30">30 度</option><option value="35">35 度</option><option value="40">40 度</option><option value="45">45 度</option><option value="50">50 度</option><option value="55">55 度</option><option value="60">60 度</option><option value="65">65 度</option><option value="70">70 度</option><option value="75">75 度</option><option value="80">80 度</option><option value="85">85 度</option><option value="90">90 度</option><option value="95">95 度</option><option value="99">99 度（原应用最大实际编码）</option></select></div>
         <p class="sub" id="reserveState" role="status" aria-live="polite">连接并授权后，收到设备实时状态即可预约。</p>
-        <div id="reserveCountdownBox" class="reserve-countdown" role="timer" aria-live="off" hidden><strong id="reserveCountdown">00:00:00</strong><span id="reserveCountdownLabel">后开始充电（本地时钟估算）</span><small>本地保存设备确认的预约时间；刷新后仅在当前设备再次报告预约模式时恢复倒计时，实际启动仍以设备状态为准。</small></div>
+        <div id="reserveCountdownBox" class="reserve-countdown" role="timer" aria-live="off" hidden><strong id="reserveCountdown">00:00:00</strong><span id="reserveCountdownLabel">后开始充电（本地时钟估算）</span></div>
         <div class="actions"><button class="primary" id="reserveSubmit" type="button" disabled>提交预约</button><button class="danger" id="reserveCancel" type="button" disabled>取消预约</button></div>
         <p class="footer">需在未来 24 小时内预约。提交条件按原小程序：插枪、未在充电中、未启用即插即充或无感充电、设备处于充电准备状态；不额外要求电子锁状态。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。仅设备确认后视为提交成功；网页不会在后台定时发送开始指令。</p>
       </div>
-      <div class="panel"><h2>本网页预约记录</h2><p class="sub">仅保存设备已确认的本网页预约操作；其他客户端修改、设备离线执行结果无法从本地记录推定。</p><div id="localReserveHistory" aria-live="off">暂无本网页记录</div><p class="footer" id="localHistoryHint">仅存储在此浏览器的网站数据中。</p><button id="localHistoryClear" class="secondary full" type="button">清除此网页的预约记录</button></div>
       </section>
       <section id="tabPanelExperiment" role="tabpanel" aria-labelledby="tabExperiment" style="margin-top:16px" hidden>
         <div class="panel"><h2>当前设备字段</h2><p class="sub" id="experimentIdentityStatus" role="status" aria-live="polite">等待当前设备 54 通知。</p></div>
@@ -122,6 +120,6 @@
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=app-queries-only-v4"></script>
+  <script defer src="./app.js?v=no-local-reservation-history-v5"></script>
 </body>
 </html>

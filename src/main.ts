@@ -1,7 +1,6 @@
 import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEvent } from "./ble";
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
-import { LocalHistory } from "./history";
 import type { ExperimentalQuery } from "./experimental";
 import { showTab, tabIndexForKey } from "./tabs";
 
@@ -21,9 +20,8 @@ const text = (id: string, value: string): void => { el(id).textContent = value; 
 text("buildInfo", formatBuildInfo({ version: __BUILD_VERSION__, revision: __BUILD_REVISION__, builtAt: __BUILD_TIME__ }));
 const adapter = (navigator as Navigator & { bluetooth?: BleAdapter }).bluetooth;
 const diagnostics = new Diagnostics();
-let localStorageAccess: Storage | undefined;
-try { localStorageAccess = window.localStorage; } catch { /* 私密模式可能禁止网站存储 */ }
-const history = new LocalHistory(localStorageAccess);
+// 移除旧版网页生成的本地充电/预约记录；不影响设备和验证码存储。
+try { window.localStorage.removeItem("wattsaving-local-history-v1"); } catch { /* 浏览器本地存储不可用 */ }
 const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
   diagnostics.add(event, data, level);
   refreshDiagnostics();
@@ -37,7 +35,7 @@ let adminMessage = "";
 let experimentQueryResult = "";
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
-let confirmedReservation: { deviceId: string; startsAt: number; source: "session" | "restored" } | null = null;
+let confirmedReservation: { deviceId: string; startsAt: number } | null = null;
 const feedback = new FeedbackHistory(100);
 let lastFeedbackPaintAt = 0;
 let feedbackDirty = false;
@@ -45,26 +43,6 @@ let errorDialogs = 0;
 const pad = (value: number): string => String(value).padStart(2, "0");
 function localMinute(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-function formatHistoryTime(value: number | null): string {
-  return value && Number.isFinite(value) ? new Date(value).toLocaleString("zh-CN") : "未知";
-}
-function renderHistory(): void {
-  const id = client?.currentDevice?.id || history.latestDeviceId();
-  const reservations = id ? history.reservations(id) : [];
-  const show = (boxId: string, entries: string[]): void => {
-    const box = el(boxId);
-    box.replaceChildren();
-    if (!entries.length) { box.textContent = "暂无本网页记录"; return; }
-    const list = document.createElement("ol"); list.className = "history-list";
-    for (const entry of entries) { const item = document.createElement("li"); item.textContent = entry; list.append(item); }
-    box.append(list);
-  };
-  const names: Record<string, string> = { accepted: "设备已接受，待核对模式", observed: "曾观察到预约模式", charging: "后续观察到充电中", ended: "后续观察到停止充电", cancelled: "设备已确认取消", replaced: "被本网页新预约替换" };
-  show("localReserveHistory", reservations.map(r =>
-    `提交：${formatHistoryTime(r.submittedAt)} · 预约：${formatHistoryTime(r.startsAt)}\n` +
-    `结束方式：${r.end} · 本地记录：${names[r.state] || "状态未知"}`));
-  text("localHistoryHint", history.available ? "仅存储在此浏览器的网站数据中。" : "浏览器禁止本地存储；记录仅在本次页面有效。");
 }
 function resetReservationStart(): void {
   reservationStartAutomatic = true;
@@ -101,8 +79,7 @@ function updateReservationCountdown(): void {
   box.hidden = false;
   text("reserveCountdown", countdownTo(confirmedReservation.startsAt, now));
   text("reserveCountdownLabel", now < confirmedReservation.startsAt ?
-    confirmedReservation.source === "restored" ? "后开始充电（仅本地记录；设备时间不可核对）" : "后开始充电（本地时钟估算）" :
-    "预约时间已到，等待设备状态确认");
+    "后开始充电（本地时钟估算）" : "预约时间已到，等待设备状态确认");
 }
 function environment(): DiagnosticEnvironment {
   const scheme = location.protocol === "https:" ? "https" : location.protocol === "file:" ? "file" :
@@ -184,14 +161,6 @@ function handleEvent(event: ChargerEvent): void {
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
-    const deviceId = client?.currentDevice?.id;
-    if (deviceId) {
-      history.trackStatus(deviceId, event.status);
-      const saved = history.latestReservation(deviceId);
-      if (event.status.mode === "3" && saved && (!confirmedReservation || confirmedReservation.deviceId !== deviceId)) {
-        confirmedReservation = { deviceId, startsAt: saved.startsAt, source: "restored" };
-      }
-    }
     if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
     statusAt = Date.now(); staleLoggedFor = 0; record("收到设备状态通知。", true);
   }
@@ -285,7 +254,6 @@ function render(): void {
     reservationResult || !fresh ? reservationResult || "等待最新设备状态，操作暂不可用。" : status?.mode === "3" ? "设备通知显示预约模式；可修改或取消。" :
     reservationBlocked ? reservationBlocked : client.canCancelReservation ? "设备已确认提交，尚待新的预约模式状态通知。" : "设备未报告预约模式；可设置新的预约。");
   updateReservationCountdown();
-  renderHistory();
 }
 function selectedProtocol(): Version | undefined {
   const value = el<HTMLSelectElement>("liveProtocol").value;
@@ -406,13 +374,11 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
     if (action === "submit") {
       await client.submitReservation(reservation!);
       if (deviceId && client.currentDevice?.id === deviceId) {
-        confirmedReservation = { deviceId, startsAt: reservation!.start.getTime(), source: "session" };
-        history.acceptReservation(deviceId, reservation!.start.getTime(), reservation!.end);
+        confirmedReservation = { deviceId, startsAt: reservation!.start.getTime() };
       }
     } else {
       await client.cancelReservation();
       if (confirmedReservation?.deviceId === deviceId) confirmedReservation = null;
-      if (deviceId) history.cancelReservation(deviceId);
     }
     reservationResult = `设备已确认${label}；请核对设备当前预约状态。`;
     record(reservationResult);
@@ -477,12 +443,8 @@ el("liveForgetPassword").addEventListener("click", () => {
   client?.forgetPassword(); diagnostics.add("password-forgotten"); record("已删除保存的验证码。"); render();
 });
 el("liveForgetDevice").addEventListener("click", () => {
-  if (!window.confirm("清除本网站保存的设备记录、验证码及全部本地预约记录，并断开连接？")) return;
-  client?.forgetDevice(); history.clear(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
-});
-el("localHistoryClear").addEventListener("click", () => {
-  if (!window.confirm("确定删除此浏览器中所有设备的本网页预约记录？无法恢复。")) return;
-  history.clear(); confirmedReservation = null; render();
+  if (!window.confirm("清除本网站保存的设备记录和验证码，并断开连接？")) return;
+  client?.forgetDevice(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
 });
 el("copyDiagnostics").addEventListener("click", async () => {
   const value = diagnostics.exportText(environment());

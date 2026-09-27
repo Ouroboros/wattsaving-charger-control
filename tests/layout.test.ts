@@ -34,7 +34,7 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   assert.match(experiment, /<strong>4G 信息<\/strong><br>请求：<code>23 0A 44 [^<]+<\/code><br>回报：<code>94<\/code>/);
   assert.match(experiment, /<\/p>\s*<p class="sub">桩编码与枪号自动从同一设备的有效 54 通知取得。<\/p>/);
   assert.doesNotMatch(experiment, /id="experimentPile"|id="experimentGun"|id="experimentAutoQuery"/);
-  assert.doesNotMatch(charge, /id="localChargeHistory"|本网页充电记录|尚未与真实充电桩及 Bluefy 联调/);
+  assert.doesNotMatch(charge, /id="localChargeHistory"|id="localReserveHistory"|本网页充电记录|本网页预约记录|id="localHistoryClear"|尚未与真实充电桩及 Bluefy 联调/);
   assert.match(connection, /id="liveChoose"/);
   assert.match(connection, /id="liveForgetDevice"/);
   assert.doesNotMatch(connection, /id="liveStart"|id="reserveSubmit"/);
@@ -47,6 +47,13 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   assert.doesNotMatch(about, /个人用网页 · 非官方产品|真机控制 · 尚待实机验证/);
   assert.match(html, /id="liveLog" role="log" aria-live="off"/);
   assert.match(html, /\.log \{[^}]*max-height:240px; overflow-y:auto;/);
+});
+
+test("网页不再保存充电或预约历史；旧历史键仅作清理，倒计时保留本页会话", () => {
+  const source = readFileSync("src/main.ts", "utf8");
+  assert.match(source, /localStorage\.removeItem\("wattsaving-local-history-v1"\)/);
+  assert.doesNotMatch(source, /LocalHistory|renderHistory|history\.|localHistoryClear|source: "restored"|localReserveHistory/);
+  assert.match(source, /confirmedReservation = \{ deviceId, startsAt: reservation!\.start\.getTime\(\) \}/);
 });
 
 test("实验页和发送实现都不再提供档位写入；只保留手动查询", () => {
