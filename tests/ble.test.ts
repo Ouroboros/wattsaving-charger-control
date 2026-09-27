@@ -97,6 +97,28 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
 });
+test("断线及重连时移除旧通知监听，避免累积回调", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const add = device.notifier.addEventListener.bind(device.notifier);
+  const remove = device.notifier.removeEventListener.bind(device.notifier);
+  let added = 0, removed = 0;
+  device.notifier.addEventListener = (type, listener, options) => {
+    if (type === "characteristicvaluechanged") added++;
+    add(type, listener, options);
+  };
+  device.notifier.removeEventListener = (type, listener, options) => {
+    if (type === "characteristicvaluechanged") removed++;
+    remove(type, listener, options);
+  };
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2);
+  client.disconnect();
+  await client.chooseDevice(2);
+  client.disconnect();
+  assert.equal(added, 2);
+  assert.equal(removed, 2);
+});
 test("GATT 已连接就记住设备；未确认的验证码不保存，下次无需弹选择器", async () => {
   const storage = new MemoryStorage();
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = storage;
@@ -278,6 +300,78 @@ test("服务特征读取失败记录服务代码、错误类别和失败阶段",
   assert.ok(log.recent.some(entry => entry.event === "characteristics-error" && entry.data.service === "ff00" && entry.data.kind === "SecurityError" && entry.data.reason === "permission"));
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "characteristics-ff00"));
   assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
+});
+test("查询服务时断线会中止扫描，不再误报后续服务或特征缺失", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  let rejectService: (error: Error) => void = () => { throw new Error("服务查询尚未开始"); };
+  let queries = 0;
+  device.gatt.getPrimaryService = async () => { queries++; return new Promise((_, reject) => { rejectService = reject; }); };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  const pending = client.chooseDevice(2);
+  await tick();
+  assert.equal(queries, 1);
+  device.gatt.connected = false;
+  device.dispatchEvent(new Event("gattserverdisconnected"));
+  rejectService(new Error("private-device-id service error"));
+  await assert.rejects(pending, /连接在服务发现期间已中止/);
+  assert.equal(queries, 1);
+  assert.ok(log.recent.some(entry => entry.event === "unexpected-disconnect" && entry.data.stage === "service-ff00" && typeof entry.data.afterConnectedMs === "number"));
+  assert.ok(log.recent.some(entry => entry.event === "discovery-interrupted" && entry.data.stage === "service-ff00" && entry.data.cause === "gatt-disconnected"));
+  assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.reason === "connection-interrupted"));
+  assert.equal(log.recent.some(entry => entry.event === "service-unavailable" || entry.event === "characteristics"), false);
+  assert.equal(client.currentDevice, null);
+  assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
+});
+test("查询特征等待期间断线，即使服务返回结果也不启动通知或误判特征", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  let resolveCharacteristics: (items: BleCharacteristic[]) => void = () => { throw new Error("特征查询尚未开始"); };
+  device.gatt.getPrimaryService = async () => ({
+    getCharacteristics: () => new Promise<BleCharacteristic[]>(resolve => { resolveCharacteristics = resolve; })
+  });
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  const pending = client.chooseDevice(2);
+  await tick();
+  device.gatt.connected = false;
+  device.dispatchEvent(new Event("gattserverdisconnected"));
+  resolveCharacteristics([device.notifier, device.writer] as unknown as BleCharacteristic[]);
+  await assert.rejects(pending, /连接在服务发现期间已中止/);
+  assert.ok(log.recent.some(entry => entry.event === "discovery-interrupted" && entry.data.operation === "get-characteristics"));
+  assert.equal(log.recent.some(entry => entry.event === "service-characteristics" || entry.event === "notifications-start"), false);
+  assert.equal(device.writer.sent.length, 0);
+});
+test("服务均读取失败时保留失败分类，不声称设备没有特征", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  device.gatt.getPrimaryService = async () => { throw new DOMException("permission denied", "SecurityError"); };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await assert.rejects(client.chooseDevice(2), /无法读取旧应用使用的 BLE 服务/);
+  assert.ok(log.recent.some(entry => entry.event === "discovery-summary" && entry.data.servicesFound === 0 && entry.data.failedServices === 3));
+  assert.equal(log.recent.filter(entry => entry.event === "service-unavailable" && entry.data.reason === "permission").length, 3);
+  assert.equal(log.recent.some(entry => entry.event === "unexpected-disconnect"), false);
+});
+test("通知和写入特征只从旧源码对应的服务选用", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  device.gatt.getPrimaryService = async uuid => {
+    if (uuid.startsWith("0000ffe0")) return { getCharacteristics: async () => [device.notifier, device.writer] as unknown as BleCharacteristic[] };
+    throw new DOMException("service missing", "NotFoundError");
+  };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level));
+  await assert.rejects(client.chooseDevice(2), /找不到旧应用使用的通知\/写入特征/);
+  const writer = log.recent.find(entry => entry.event === "characteristic-discovered" && entry.data.uuid === "ff02");
+  assert.equal(writer?.data.writeServiceAllowed, false);
+  assert.ok(log.recent.some(entry => entry.event === "discovery-summary" && entry.data.notify === true && entry.data.write === false));
+  assert.equal(device.writer.sent.length, 0);
 });
 test("连续相同状态不会挤掉服务发现阶段的日志", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();

@@ -36,8 +36,14 @@ export type ChargerEvent =
 const KEY = "wattsaving-ble-devices-v1";
 const UUID = (short: string): string => `0000${short}-0000-1000-8000-00805f9b34fb`;
 const SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
+// 原小程序只在 FF00/FFE0 查通知，只在 FF00/FFE5 查写入。
+const NOTIFY_SERVICES = new Set(["ff00", "ffe0"]);
+const WRITE_SERVICES = new Set(["ff00", "ffe5"]);
 const NOTIFY = new Set([UUID("ff01"), UUID("ffe4")]);
 const WRITE = new Set([UUID("ff02"), UUID("ffe9")]);
+class ConnectionInterruptedError extends Error {
+  constructor() { super("蓝牙连接在服务发现期间已中止；无法判断设备的服务或特征是否存在"); this.name = "ConnectionInterruptedError"; }
+}
 // 标准 Bluetooth UUID 的短码是无损的；不把可能含设备标识的自定义 128 位 UUID 写入日志。
 function diagnosticUuid(value: unknown): string {
   if (typeof value !== "string") return "missing";
@@ -67,6 +73,7 @@ export class ChargerClient {
   private device: BleDevice | null = null;
   private server: BleServer | null = null;
   private writer: BleCharacteristic | null = null;
+  private notifier: BleCharacteristic | null = null;
   private listener: ((event: Event) => void) | null = null;
   private decoder = new FrameDecoder();
   private rxNotifications = 0;
@@ -79,6 +86,8 @@ export class ChargerClient {
   private autoLoginTried = false;
   private protocol: Version | null = null;
   private phase: Phase = "offline";
+  private connectionStage = "offline";
+  private connectedAt = 0;
   private latest: DeviceStatus | null = null;
   private latestAt = 0;
   private pendingAuth: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password: string; remember: boolean } | null = null;
@@ -179,39 +188,62 @@ export class ChargerClient {
     const epoch = this.epoch;
     this.device = device;
     let stage = "gatt";
+    this.connectionStage = stage;
+    const markStage = (next: string): void => { stage = next; if (epoch === this.epoch) this.connectionStage = next; };
     this.diagnose("gatt-connect-start");
     this.setPhase("connecting", `正在连接 ${device.name || "未命名设备"}…`);
     try {
       if (!device.gatt) throw new Error("设备不提供 GATT 服务");
       const server = await device.gatt.connect();
       if (epoch !== this.epoch || !this.enabled()) { if (server.connected) server.disconnect(); return; }
+      if (!server.connected) throw new ConnectionInterruptedError();
       this.server = server;
+      this.connectedAt = Date.now();
       this.diagnose("gatt-connected");
       this.rememberConnectedDevice(device);
       device.addEventListener("gattserverdisconnected", this.onDisconnected);
+      const ensureActive = (operation: string, originalError?: unknown): void => {
+        if (epoch === this.epoch && this.server === server && server.connected && this.enabled()) return;
+        const cause = !server.connected ? "gatt-disconnected" : epoch !== this.epoch ? "session-ended" :
+          !this.enabled() ? "control-disabled" : "server-replaced";
+        const original = originalError === undefined ? null : diagnosticError(originalError);
+        this.diagnose("discovery-interrupted", { stage, operation, cause, connected: server.connected,
+          ...(original ? { operationKind: original.kind, operationReason: original.reason } : {}) }, "warn");
+        throw new ConnectionInterruptedError();
+      };
+      ensureActive("before-services");
       let notifier: BleCharacteristic | null = null, writer: BleCharacteristic | null = null;
       let notifyService = "none", writeService = "none";
+      let servicesFound = 0, missingServices = 0, failedServices = 0;
       for (const uuid of SERVICES) {
         const serviceCode = uuid.slice(4, 8);
-        stage = `service-${serviceCode}`;
+        markStage(`service-${serviceCode}`);
         let service: BleService;
-        try { service = await this.server.getPrimaryService(uuid); }
+        try { service = await server.getPrimaryService(uuid); }
         catch (error) {
+          ensureActive("get-service", error);
           const details = diagnosticError(error);
+          if (details.reason === "not-found") missingServices++; else failedServices++;
           this.diagnose("service-unavailable", { service: serviceCode, ...details }, details.reason === "not-found" ? "info" : "warn");
           continue;
         }
+        ensureActive("get-service");
+        servicesFound++;
         this.diagnose("service-found", { service: serviceCode });
-        stage = `characteristics-${serviceCode}`;
+        markStage(`characteristics-${serviceCode}`);
         let characteristics: BleCharacteristic[];
         try { characteristics = await service.getCharacteristics(); }
         catch (error) {
+          ensureActive("get-characteristics", error);
           this.diagnose("characteristics-error", { service: serviceCode, ...diagnosticError(error) }, "warn");
           throw error;
         }
+        ensureActive("get-characteristics");
         this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
         for (const [index, characteristic] of characteristics.entries()) {
           const properties = characteristic.properties;
+          const notifyServiceAllowed = NOTIFY_SERVICES.has(serviceCode);
+          const writeServiceAllowed = WRITE_SERVICES.has(serviceCode);
           this.diagnose("characteristic-discovered", {
             service: serviceCode, index, uuid: diagnosticUuid(characteristic.uuid), propertiesAvailable: !!properties,
             read: !!properties?.read, notify: !!properties?.notify, indicate: !!properties?.indicate,
@@ -219,17 +251,23 @@ export class ChargerClient {
             notifyMethod: typeof characteristic.startNotifications === "function",
             writeResponseMethod: typeof characteristic.writeValueWithResponse === "function",
             writeNoResponseMethod: typeof characteristic.writeValueWithoutResponse === "function",
-            writeLegacyMethod: typeof characteristic.writeValue === "function"
+            writeLegacyMethod: typeof characteristic.writeValue === "function",
+            notifyServiceAllowed, writeServiceAllowed
           });
           const id = characteristic.uuid.toLowerCase();
-          if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) { notifier = characteristic; notifyService = serviceCode; }
-          if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) { writer = characteristic; writeService = serviceCode; }
+          if (!notifier && notifyServiceAllowed && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) { notifier = characteristic; notifyService = serviceCode; }
+          if (!writer && writeServiceAllowed && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) { writer = characteristic; writeService = serviceCode; }
         }
         if (notifier && writer) break;
       }
+      ensureActive("complete-discovery");
+      this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer });
       this.diagnose("characteristics", { notify: !!notifier, write: !!writer,
         notifyService, notifyUuid: diagnosticUuid(notifier?.uuid), writeService, writeUuid: diagnosticUuid(writer?.uuid) });
-      if (!notifier || !writer) throw new Error("找不到旧应用使用的通知/写入特征；请核对充电桩型号");
+      if (!notifier || !writer) {
+        if (!servicesFound) throw new Error(failedServices ? "无法读取旧应用使用的 BLE 服务；不能判断特征是否存在" : "未找到旧应用使用的 BLE 服务；不能读取特征");
+        throw new Error("找不到旧应用使用的通知/写入特征；请核对充电桩型号");
+      }
       this.writer = writer;
       this.listener = event => {
         const view = (event.target as BleCharacteristic | null)?.value;
@@ -239,12 +277,14 @@ export class ChargerClient {
         notifyMethod: typeof notifier.startNotifications === "function", writeResponse: typeof writer.writeValueWithResponse === "function",
         writeNoResponse: typeof writer.writeValueWithoutResponse === "function", writeLegacy: typeof writer.writeValue === "function"
       });
+      this.notifier = notifier;
       notifier.addEventListener("characteristicvaluechanged", this.listener);
-      stage = "notifications";
+      markStage("notifications");
       this.diagnose("notifications-start", { notify: !!notifier.properties?.notify, indicate: !!notifier.properties?.indicate });
       try { await notifier.startNotifications(); }
-      catch (error) { this.diagnose("notifications-error", diagnosticError(error), "error"); throw error; }
-      if (epoch !== this.epoch) return;
+      catch (error) { ensureActive("start-notifications", error); this.diagnose("notifications-error", diagnosticError(error), "error"); throw error; }
+      ensureActive("start-notifications");
+      markStage("connected");
       this.diagnose("notifications-started");
       if (!this.protocol) this.setPhase("detecting", "已连接，等待设备报文以辨识协议…");
       if (!this.protocol && requested) this.chooseProtocol(requested, "用户指定");
@@ -453,7 +493,12 @@ export class ChargerClient {
       throw error;
     }
   }
-  private readonly onDisconnected = (): void => { this.diagnose("unexpected-disconnect", {}, "warn"); this.disconnect(); this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" }); };
+  private readonly onDisconnected = (): void => {
+    this.diagnose("unexpected-disconnect", { stage: this.connectionStage,
+      afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null }, "warn");
+    this.disconnect();
+    this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" });
+  };
   disconnect(): void {
     this.epoch++;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
@@ -462,14 +507,16 @@ export class ChargerClient {
     this.rejectControl(new Error("蓝牙连接已断开；指令实际结果未知"), "disconnect");
     this.rejectReservation(new Error("蓝牙连接已断开；预约实际结果未知"), "disconnect");
     const server = this.server;
-    if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
+    if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected, stage: this.connectionStage });
     this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
-    this.device = null; this.server = null; this.writer = null; this.listener = null;
+    if (this.notifier && this.listener) this.notifier.removeEventListener("characteristicvaluechanged", this.listener);
+    this.device = null; this.server = null; this.writer = null; this.notifier = null; this.listener = null;
     try { if (server?.connected) server.disconnect(); } catch { /* 连接可能已自行断开 */ }
     this.protocol = null; this.latest = null; this.latestAt = 0;
     this.autoLoginTried = false; this.reservationAccepted = null; this.decoder.reset();
     this.rxNotifications = 0; this.rxBytes = 0; this.decodedFrames = 0;
     this.statusFrames = 0; this.lastStatusSignature = "";
+    this.connectionStage = "offline"; this.connectedAt = 0;
     this.setPhase("offline", "未连接充电桩");
   }
 }

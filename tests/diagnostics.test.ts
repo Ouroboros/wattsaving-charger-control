@@ -9,7 +9,7 @@ class MemoryStorage {
   removeItem(key: string): void { this.values.delete(key); }
 }
 const environment: DiagnosticEnvironment = { secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" };
-test("诊断 v2 只输出有限错误类别与原因，不导出错误原文或报文字段", () => {
+test("诊断 v3 只输出有限错误类别与原因，不导出错误原文或报文字段", () => {
   const diagnostic = new Diagnostics(null);
   const error = new Error("Permission denied for private-device-id, code 54321");
   error.name = "private-device-name";
@@ -18,8 +18,10 @@ test("诊断 v2 只输出有限错误类别与原因，不导出错误原文或�
   assert.deepEqual(diagnosticError(new Error("Characteristic missing")), { kind: "Error", reason: "not-found" });
   assert.deepEqual(diagnosticError(new DOMException("User cancelled", "NotFoundError")), { kind: "NotFoundError", reason: "cancelled" });
   assert.deepEqual(diagnosticError(new Error("MTU exceeded")), { kind: "Error", reason: "size-or-mtu" });
+  const interrupted = new Error("private-device-id"); interrupted.name = "ConnectionInterruptedError";
+  assert.deepEqual(diagnosticError(interrupted), { kind: "ConnectionInterruptedError", reason: "connection-interrupted" });
   const text = diagnostic.exportText(environment);
-  assert.match(text, /diagnostics v2/);
+  assert.match(text, /diagnostics v3/);
   for (const secret of ["private-device-id", "private-device-name", "54321", "private-raw-payload", "private-error-message"]) assert.equal(text.includes(secret), false);
   assert.match(text, /\[REDACTED\]/);
 });

@@ -18,7 +18,7 @@ const KEY = "wattsaving-diagnostics-v1";
 const MAX_ENTRIES = 160;
 const MAX_CHARS = 32000;
 const HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin|raw|payload|frame|message/i;
-const SAFE_ERROR_NAMES = new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError"]);
+const SAFE_ERROR_NAMES = new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError", "ConnectionInterruptedError"]);
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // 不记录浏览器/设备自由文本错误；只记录有限的异常类别和推断的失败阶段原因。
@@ -26,7 +26,8 @@ export function diagnosticError(error: unknown): { kind: string; reason: string 
   const name = error instanceof Error ? error.name : "unknown";
   const kind = SAFE_ERROR_NAMES.has(name) ? name : "other";
   const text = `${name} ${error instanceof Error ? error.message : ""}`.toLowerCase();
-  const reason = /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" :
+  const reason = /connectioninterrupted/.test(text) ? "connection-interrupted" :
+    /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" :
     /not.?found|unknown service|unknown characteristic|unavailable|not available|\bmissing\b|does not exist|no such/.test(text) ? "not-found" :
     /permission|not.?allowed|security|unauthori[sz]ed|access denied/.test(text) ? "permission" :
     /bluetooth.*(?:off|disabled)|powered off/.test(text) ? "bluetooth-off" :
@@ -103,7 +104,7 @@ export class Diagnostics {
   exportText(environment: DiagnosticEnvironment): string {
     // 再清洗一次：将此前存储的记录与新加入的隐藏词一并脱敏。
     const entries = this.entries.map(entry => this.cleanEntry(entry));
-    return ["WattSaving diagnostics v2 (no passwords, device IDs or raw BLE frames)",
+    return ["WattSaving diagnostics v3 (no passwords, device IDs or raw BLE frames)",
       `environment: ${JSON.stringify(environment)}`,
       `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
       ...entries.map(entry => JSON.stringify(entry))].join("\n");

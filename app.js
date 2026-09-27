@@ -158,13 +158,13 @@
   var MAX_ENTRIES = 160;
   var MAX_CHARS = 32e3;
   var HIDDEN_FIELD = /pass(word)?|secret|token|device.?id|device.?name|alias|mac|path|url|ssid|vin|raw|payload|frame|message/i;
-  var SAFE_ERROR_NAMES = /* @__PURE__ */ new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError"]);
+  var SAFE_ERROR_NAMES = /* @__PURE__ */ new Set(["Error", "TypeError", "NotFoundError", "NotAllowedError", "SecurityError", "NetworkError", "NotSupportedError", "InvalidStateError", "AbortError", "TimeoutError", "OperationError", "DataError", "ConnectionInterruptedError"]);
   var escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   function diagnosticError(error) {
     const name = error instanceof Error ? error.name : "unknown";
     const kind = SAFE_ERROR_NAMES.has(name) ? name : "other";
     const text2 = `${name} ${error instanceof Error ? error.message : ""}`.toLowerCase();
-    const reason = /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" : /not.?found|unknown service|unknown characteristic|unavailable|not available|\bmissing\b|does not exist|no such/.test(text2) ? "not-found" : /permission|not.?allowed|security|unauthori[sz]ed|access denied/.test(text2) ? "permission" : /bluetooth.*(?:off|disabled)|powered off/.test(text2) ? "bluetooth-off" : /disconnect|not connected|connection lost/.test(text2) ? "disconnected" : /time.?out/.test(text2) ? "timeout" : /unsupported|not supported|not implemented/.test(text2) ? "unsupported" : /busy|in progress/.test(text2) ? "busy" : /length|too long|exceed|\bmtu\b/.test(text2) ? "size-or-mtu" : "unspecified";
+    const reason = /connectioninterrupted/.test(text2) ? "connection-interrupted" : /cancel|abort/.test(error instanceof Error ? error.message.toLowerCase() : "") ? "cancelled" : /not.?found|unknown service|unknown characteristic|unavailable|not available|\bmissing\b|does not exist|no such/.test(text2) ? "not-found" : /permission|not.?allowed|security|unauthori[sz]ed|access denied/.test(text2) ? "permission" : /bluetooth.*(?:off|disabled)|powered off/.test(text2) ? "bluetooth-off" : /disconnect|not connected|connection lost/.test(text2) ? "disconnected" : /time.?out/.test(text2) ? "timeout" : /unsupported|not supported|not implemented/.test(text2) ? "unsupported" : /busy|in progress/.test(text2) ? "busy" : /length|too long|exceed|\bmtu\b/.test(text2) ? "size-or-mtu" : "unspecified";
     return { kind, reason };
   }
   var Diagnostics = class {
@@ -237,7 +237,7 @@
     exportText(environment2) {
       const entries = this.entries.map((entry) => this.cleanEntry(entry));
       return [
-        "WattSaving diagnostics v2 (no passwords, device IDs or raw BLE frames)",
+        "WattSaving diagnostics v3 (no passwords, device IDs or raw BLE frames)",
         `environment: ${JSON.stringify(environment2)}`,
         `localPersistence: ${this.storageAvailable ? "available" : "unavailable"}`,
         ...entries.map((entry) => JSON.stringify(entry))
@@ -258,8 +258,16 @@
   var KEY2 = "wattsaving-ble-devices-v1";
   var UUID = (short) => `0000${short}-0000-1000-8000-00805f9b34fb`;
   var SERVICES = ["ff00", "ffe0", "ffe5"].map(UUID);
+  var NOTIFY_SERVICES = /* @__PURE__ */ new Set(["ff00", "ffe0"]);
+  var WRITE_SERVICES = /* @__PURE__ */ new Set(["ff00", "ffe5"]);
   var NOTIFY = /* @__PURE__ */ new Set([UUID("ff01"), UUID("ffe4")]);
   var WRITE = /* @__PURE__ */ new Set([UUID("ff02"), UUID("ffe9")]);
+  var ConnectionInterruptedError = class extends Error {
+    constructor() {
+      super("\u84DD\u7259\u8FDE\u63A5\u5728\u670D\u52A1\u53D1\u73B0\u671F\u95F4\u5DF2\u4E2D\u6B62\uFF1B\u65E0\u6CD5\u5224\u65AD\u8BBE\u5907\u7684\u670D\u52A1\u6216\u7279\u5F81\u662F\u5426\u5B58\u5728");
+      this.name = "ConnectionInterruptedError";
+    }
+  };
   function diagnosticUuid(value) {
     if (typeof value !== "string") return "missing";
     const id = value.toLowerCase();
@@ -292,6 +300,7 @@
       __publicField(this, "device", null);
       __publicField(this, "server", null);
       __publicField(this, "writer", null);
+      __publicField(this, "notifier", null);
       __publicField(this, "listener", null);
       __publicField(this, "decoder", new FrameDecoder());
       __publicField(this, "rxNotifications", 0);
@@ -304,6 +313,8 @@
       __publicField(this, "autoLoginTried", false);
       __publicField(this, "protocol", null);
       __publicField(this, "phase", "offline");
+      __publicField(this, "connectionStage", "offline");
+      __publicField(this, "connectedAt", 0);
       __publicField(this, "latest", null);
       __publicField(this, "latestAt", 0);
       __publicField(this, "pendingAuth", null);
@@ -312,7 +323,10 @@
       __publicField(this, "reservationAccepted", null);
       __publicField(this, "fallbackVault", { lastId: "", devices: {} });
       __publicField(this, "onDisconnected", () => {
-        this.diagnose("unexpected-disconnect", {}, "warn");
+        this.diagnose("unexpected-disconnect", {
+          stage: this.connectionStage,
+          afterConnectedMs: this.connectedAt ? Math.max(0, Date.now() - this.connectedAt) : null
+        }, "warn");
         this.disconnect();
         this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u65AD\u7EBF\uFF1B\u9875\u9762\u6570\u636E\u4E0D\u518D\u89C6\u4E3A\u5B9E\u65F6\u3002" });
       });
@@ -434,6 +448,11 @@
       const epoch = this.epoch;
       this.device = device;
       let stage = "gatt";
+      this.connectionStage = stage;
+      const markStage = (next) => {
+        stage = next;
+        if (epoch === this.epoch) this.connectionStage = next;
+      };
       this.diagnose("gatt-connect-start");
       this.setPhase("connecting", `\u6B63\u5728\u8FDE\u63A5 ${device.name || "\u672A\u547D\u540D\u8BBE\u5907"}\u2026`);
       try {
@@ -443,35 +462,61 @@
           if (server.connected) server.disconnect();
           return;
         }
+        if (!server.connected) throw new ConnectionInterruptedError();
         this.server = server;
+        this.connectedAt = Date.now();
         this.diagnose("gatt-connected");
         this.rememberConnectedDevice(device);
         device.addEventListener("gattserverdisconnected", this.onDisconnected);
+        const ensureActive = (operation, originalError) => {
+          if (epoch === this.epoch && this.server === server && server.connected && this.enabled()) return;
+          const cause = !server.connected ? "gatt-disconnected" : epoch !== this.epoch ? "session-ended" : !this.enabled() ? "control-disabled" : "server-replaced";
+          const original = originalError === void 0 ? null : diagnosticError(originalError);
+          this.diagnose("discovery-interrupted", {
+            stage,
+            operation,
+            cause,
+            connected: server.connected,
+            ...original ? { operationKind: original.kind, operationReason: original.reason } : {}
+          }, "warn");
+          throw new ConnectionInterruptedError();
+        };
+        ensureActive("before-services");
         let notifier = null, writer = null;
         let notifyService = "none", writeService = "none";
+        let servicesFound = 0, missingServices = 0, failedServices = 0;
         for (const uuid of SERVICES) {
           const serviceCode = uuid.slice(4, 8);
-          stage = `service-${serviceCode}`;
+          markStage(`service-${serviceCode}`);
           let service;
           try {
-            service = await this.server.getPrimaryService(uuid);
+            service = await server.getPrimaryService(uuid);
           } catch (error) {
+            ensureActive("get-service", error);
             const details = diagnosticError(error);
+            if (details.reason === "not-found") missingServices++;
+            else failedServices++;
             this.diagnose("service-unavailable", { service: serviceCode, ...details }, details.reason === "not-found" ? "info" : "warn");
             continue;
           }
+          ensureActive("get-service");
+          servicesFound++;
           this.diagnose("service-found", { service: serviceCode });
-          stage = `characteristics-${serviceCode}`;
+          markStage(`characteristics-${serviceCode}`);
           let characteristics;
           try {
             characteristics = await service.getCharacteristics();
           } catch (error) {
+            ensureActive("get-characteristics", error);
             this.diagnose("characteristics-error", { service: serviceCode, ...diagnosticError(error) }, "warn");
             throw error;
           }
+          ensureActive("get-characteristics");
           this.diagnose("service-characteristics", { service: serviceCode, count: characteristics.length });
           for (const [index, characteristic] of characteristics.entries()) {
             const properties = characteristic.properties;
+            const notifyServiceAllowed = NOTIFY_SERVICES.has(serviceCode);
+            const writeServiceAllowed = WRITE_SERVICES.has(serviceCode);
             this.diagnose("characteristic-discovered", {
               service: serviceCode,
               index,
@@ -485,20 +530,24 @@
               notifyMethod: typeof characteristic.startNotifications === "function",
               writeResponseMethod: typeof characteristic.writeValueWithResponse === "function",
               writeNoResponseMethod: typeof characteristic.writeValueWithoutResponse === "function",
-              writeLegacyMethod: typeof characteristic.writeValue === "function"
+              writeLegacyMethod: typeof characteristic.writeValue === "function",
+              notifyServiceAllowed,
+              writeServiceAllowed
             });
             const id = characteristic.uuid.toLowerCase();
-            if (!notifier && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) {
+            if (!notifier && notifyServiceAllowed && NOTIFY.has(id) && (characteristic.properties.notify || characteristic.properties.indicate)) {
               notifier = characteristic;
               notifyService = serviceCode;
             }
-            if (!writer && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) {
+            if (!writer && writeServiceAllowed && WRITE.has(id) && (characteristic.properties.write || characteristic.properties.writeWithoutResponse)) {
               writer = characteristic;
               writeService = serviceCode;
             }
           }
           if (notifier && writer) break;
         }
+        ensureActive("complete-discovery");
+        this.diagnose("discovery-summary", { servicesFound, missingServices, failedServices, notify: !!notifier, write: !!writer });
         this.diagnose("characteristics", {
           notify: !!notifier,
           write: !!writer,
@@ -507,7 +556,10 @@
           writeService,
           writeUuid: diagnosticUuid(writer?.uuid)
         });
-        if (!notifier || !writer) throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
+        if (!notifier || !writer) {
+          if (!servicesFound) throw new Error(failedServices ? "\u65E0\u6CD5\u8BFB\u53D6\u65E7\u5E94\u7528\u4F7F\u7528\u7684 BLE \u670D\u52A1\uFF1B\u4E0D\u80FD\u5224\u65AD\u7279\u5F81\u662F\u5426\u5B58\u5728" : "\u672A\u627E\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684 BLE \u670D\u52A1\uFF1B\u4E0D\u80FD\u8BFB\u53D6\u7279\u5F81");
+          throw new Error("\u627E\u4E0D\u5230\u65E7\u5E94\u7528\u4F7F\u7528\u7684\u901A\u77E5/\u5199\u5165\u7279\u5F81\uFF1B\u8BF7\u6838\u5BF9\u5145\u7535\u6869\u578B\u53F7");
+        }
         this.writer = writer;
         this.listener = (event) => {
           const view = event.target?.value;
@@ -519,16 +571,19 @@
           writeNoResponse: typeof writer.writeValueWithoutResponse === "function",
           writeLegacy: typeof writer.writeValue === "function"
         });
+        this.notifier = notifier;
         notifier.addEventListener("characteristicvaluechanged", this.listener);
-        stage = "notifications";
+        markStage("notifications");
         this.diagnose("notifications-start", { notify: !!notifier.properties?.notify, indicate: !!notifier.properties?.indicate });
         try {
           await notifier.startNotifications();
         } catch (error) {
+          ensureActive("start-notifications", error);
           this.diagnose("notifications-error", diagnosticError(error), "error");
           throw error;
         }
-        if (epoch !== this.epoch) return;
+        ensureActive("start-notifications");
+        markStage("connected");
         this.diagnose("notifications-started");
         if (!this.protocol) this.setPhase("detecting", "\u5DF2\u8FDE\u63A5\uFF0C\u7B49\u5F85\u8BBE\u5907\u62A5\u6587\u4EE5\u8FA8\u8BC6\u534F\u8BAE\u2026");
         if (!this.protocol && requested) this.chooseProtocol(requested, "\u7528\u6237\u6307\u5B9A");
@@ -793,11 +848,13 @@
       this.rejectControl(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u6307\u4EE4\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       this.rejectReservation(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00\uFF1B\u9884\u7EA6\u5B9E\u9645\u7ED3\u679C\u672A\u77E5"), "disconnect");
       const server = this.server;
-      if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected });
+      if (this.device || server) this.diagnose("disconnect", { connected: !!server?.connected, stage: this.connectionStage });
       this.device?.removeEventListener("gattserverdisconnected", this.onDisconnected);
+      if (this.notifier && this.listener) this.notifier.removeEventListener("characteristicvaluechanged", this.listener);
       this.device = null;
       this.server = null;
       this.writer = null;
+      this.notifier = null;
       this.listener = null;
       try {
         if (server?.connected) server.disconnect();
@@ -814,6 +871,8 @@
       this.decodedFrames = 0;
       this.statusFrames = 0;
       this.lastStatusSignature = "";
+      this.connectionStage = "offline";
+      this.connectedAt = 0;
       this.setPhase("offline", "\u672A\u8FDE\u63A5\u5145\u7535\u6869");
     }
   };
@@ -1161,7 +1220,7 @@
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
   resetReservationStart();
-  diagnostics.add("app-start", { ...environment(), schema: 2 });
+  diagnostics.add("app-start", { ...environment(), schema: 3 });
   refreshDiagnostics(true);
   render();
   setInterval(render, 5e3);

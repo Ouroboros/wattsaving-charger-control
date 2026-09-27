@@ -267,7 +267,7 @@ el("clearDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
 resetReservationStart();
-diagnostics.add("app-start", { ...environment(), schema: 2 });
+diagnostics.add("app-start", { ...environment(), schema: 3 });
 refreshDiagnostics(true);
 render();
 setInterval(render, 5000);
