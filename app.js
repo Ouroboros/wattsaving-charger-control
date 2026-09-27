@@ -1208,7 +1208,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "a4377d7", builtAt: "2026-09-27T08:30:15.383Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "c79faa0", builtAt: "2026-09-27T08:45:42.330Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1366,7 +1366,12 @@
     }
     text("liveDevice", device ? `${device.name || "\u672A\u547D\u540D\u8BBE\u5907"} \xB7 ${client?.authorized ? "\u5DF2\u6388\u6743" : "\u672A\u6388\u6743"}` : client?.rememberedName ? `\u4E0A\u6B21\u8BBE\u5907\uFF1A${client.rememberedName}\uFF08\u672A\u8FDE\u63A5\uFF09` : "\u5C1A\u672A\u9009\u62E9\u8BBE\u5907");
     text("liveState", client?.authorized ? stateName(status2) : "\u672A\u53D6\u5F97\u8BBE\u5907\u5B9E\u65F6\u72B6\u6001");
-    text("livePhase", client?.authorized ? "\u5DF2\u6388\u6743" : phase === "offline" ? "\u672A\u8FDE\u63A5" : phase === "password" ? "\u5F85\u8F93\u5165\u5BC6\u7801" : phase === "authenticating" ? "\u7B49\u8BBE\u5907\u786E\u8BA4" : "\u8FDE\u63A5\u4E2D");
+    const connected = !!device?.gatt?.connected;
+    const connectionLabel = client?.authorized ? "\u5DF2\u8FDE\u63A5\uFF0C\u5DF2\u6388\u6743" : connected ? "\u5DF2\u8FDE\u63A5\uFF0C\u672A\u6388\u6743" : phase === "connecting" ? "\u8FDE\u63A5\u4E2D" : "\u672A\u8FDE\u63A5";
+    const indicator = el("livePhase");
+    indicator.className = `connection-dot${connected ? " connected" : ""}`;
+    indicator.setAttribute("aria-label", connectionLabel);
+    indicator.title = connectionLabel;
     text("liveProtocolName", client?.currentProtocol === 1 ? "\u65E7\u7248\u534F\u8BAE" : client?.currentProtocol === 2 ? "\u65B0\u7248\u534F\u8BAE" : "\u7B49\u5F85\u8BC6\u522B");
     text("liveSoc", status2 && Number.isFinite(status2.soc) ? `${status2.soc}%` : "--");
     text("liveEnergy", status2 && Number.isFinite(status2.energyKWh) ? `${status2.energyKWh.toFixed(1)} kWh` : "--");
@@ -1634,9 +1639,10 @@
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
   var tabPairs = [
-    ["tabControl", "tabPanelControl"],
-    ["tabReservation", "tabPanelReservation"],
-    ["tabFeedback", "tabPanelFeedback"]
+    ["tabConnection", "tabPanelConnection"],
+    ["tabCharge", "tabPanelCharge"],
+    ["tabFeedback", "tabPanelFeedback"],
+    ["tabAbout", "tabPanelAbout"]
   ].map(([tabId, panelId]) => ({ tab: el(tabId), panel: el(panelId) }));
   tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
   el("liveTabs").addEventListener("keydown", (event) => {
@@ -1653,8 +1659,8 @@
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "a4377d7",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:30:15.383Z")
+    buildRevision: "c79faa0",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:45:42.330Z")
   });
   refreshDiagnostics(true);
   render();

@@ -7,13 +7,12 @@
   <style>
     :root { color-scheme:light; --ink:#17313b; --muted:#63747b; --line:#dce5e3; --bg:#eff3ef; --surface:#fff; --accent:#0c795b; --soft:#e5f4ec; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
     * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); } button,input,select,textarea { font:inherit; } button { cursor:pointer; } button:disabled { opacity:.48; cursor:not-allowed; }
-    :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .top { background:#122c2a; color:#f4faf6; padding:20px max(22px,calc((100vw - 820px)/2)); display:flex; gap:20px; align-items:center; justify-content:space-between; }
-    .top strong { font-size:1.12rem; letter-spacing:.02em; } .top small { display:block; color:#bad5ca; margin-top:3px; } .top .build-info { overflow-wrap:anywhere; font-variant-numeric:tabular-nums; } .badge { border:1px solid #7cac91; border-radius:99px; padding:6px 12px; font-size:.76rem; white-space:nowrap; }
-    main { max-width:820px; margin:26px auto; padding:0 20px; } .live { background:var(--surface); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 36px #18312a0a; overflow:hidden; }
-    .workspace-head { padding:20px 24px; background:#f9fbf8; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; align-items:center; } .workspace-head h1 { font-size:1.35rem; margin:0; } .workspace-head small { color:var(--muted); }
-    .tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; padding:14px 24px 0; background:#f9fbf8; border-bottom:1px solid var(--line); }
-    .tab { min-width:0; padding:10px 5px; border:1px solid transparent; border-bottom:3px solid transparent; border-radius:10px 10px 0 0; background:transparent; color:var(--muted); font-weight:600; text-align:center; font-size:.88rem; }
+    :focus-visible { outline:3px solid #258f80; outline-offset:2px; } .build-info { overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+    main { max-width:820px; margin:0 auto; padding:0 20px; } .live { background:var(--surface); border:1px solid var(--line); border-radius:20px; box-shadow:0 12px 36px #18312a0a; overflow:visible; }
+    .tabs { position:sticky; top:0; z-index:10; display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; padding:10px 16px 0; background:#f9fbf8; border-bottom:1px solid var(--line); border-radius:18px 18px 0 0; box-shadow:0 4px 12px #18312a12; }
+    .tab { min-width:0; padding:10px 3px; border:1px solid transparent; border-bottom:3px solid transparent; border-radius:10px 10px 0 0; background:transparent; color:var(--muted); font-weight:600; text-align:center; font-size:.88rem; white-space:nowrap; }
     .tab[aria-selected="true"] { color:var(--accent); background:#fff; border-color:var(--line); border-bottom-color:var(--accent); }
+    .connection-dot { display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:50%; background:#89958e; vertical-align:1px; } .connection-dot.connected { background:#12a26e; box-shadow:0 0 0 2px #d9f2e4; }
     .screen { padding:22px 24px 26px; } [hidden] { display:none!important; } .panel { border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; background:#fff; min-width:0; max-width:100%; }
     .panel h2 { font-size:1rem; margin:0 0 10px; } .panel p { margin:5px 0 12px; } .panel .sub { color:var(--muted); font-size:.86rem; } .panel label { display:block; margin:12px 0 5px; font-weight:600; } .panel label.check { display:flex; gap:7px; align-items:center; font-weight:400; font-size:.85rem; }
     select,input[type=password],textarea { width:100%; padding:11px 12px; border:1px solid #bdcbc7; border-radius:10px; background:#fff; color:var(--ink); }
@@ -37,22 +36,21 @@
     .reserve-countdown { margin:14px 0; border:1px solid #bddec9; border-radius:12px; padding:14px; background:var(--soft); color:#174e3c; text-align:center; }
     .reserve-countdown strong { display:block; font-variant-numeric:tabular-nums; font-size:1.65rem; line-height:1.25; }
     .reserve-countdown span,.reserve-countdown small { display:block; margin:4px 0 0; } .reserve-countdown small { color:#45645a; }
-    @media(max-width:760px) { .top { padding:15px 18px; flex-wrap:wrap; } main { padding:0 12px; margin:12px auto; } .workspace-head,.screen { padding-left:16px; padding-right:16px; } .tabs { padding:10px 12px 0; gap:4px; } .tab { font-size:.82rem; padding:10px 3px; } .metrics { gap:5px; } .metric { padding:8px; } }
+    @media(max-width:760px) { main { padding:0 12px; } .screen { padding-left:16px; padding-right:16px; } .tabs { padding:10px 8px 0; gap:2px; } .tab { font-size:.82rem; padding:10px 2px; } .metrics { gap:5px; } .metric { padding:8px; } }
   </style>
 </head>
 <body>
-  <header class="top"><div><strong>WattSaving · 充电桩控制</strong><small>个人用网页 · 非官方产品</small><small id="buildInfo" class="build-info">版本信息未载入</small></div><span class="badge">真机控制 · 尚待实机验证</span></header>
   <main><section class="live" id="liveWorkspace" aria-label="蓝牙充电桩控制">
-    <div class="workspace-head"><div><h1>充电桩控制</h1><small>状态仅来自设备通知</small></div><span class="status" id="livePhase">未连接</span></div>
     <div class="tabs" id="liveTabs" role="tablist" aria-label="充电桩功能">
-      <button class="tab" id="tabControl" role="tab" aria-controls="tabPanelControl" aria-selected="true" tabindex="0" type="button">状态/充电</button>
-      <button class="tab" id="tabReservation" role="tab" aria-controls="tabPanelReservation" aria-selected="false" tabindex="-1" type="button">预约</button>
-      <button class="tab" id="tabFeedback" role="tab" aria-controls="tabPanelFeedback" aria-selected="false" tabindex="-1" type="button">反馈/诊断</button>
+      <button class="tab" id="tabConnection" role="tab" aria-controls="tabPanelConnection" aria-selected="true" tabindex="0" type="button"><span class="connection-dot" id="livePhase" role="img" aria-label="未连接" title="未连接"></span>连接</button>
+      <button class="tab" id="tabCharge" role="tab" aria-controls="tabPanelCharge" aria-selected="false" tabindex="-1" type="button">充电</button>
+      <button class="tab" id="tabFeedback" role="tab" aria-label="反馈与诊断" aria-controls="tabPanelFeedback" aria-selected="false" tabindex="-1" type="button">反馈</button>
+      <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
     <div class="screen">
+      <section id="tabPanelConnection" role="tabpanel" aria-labelledby="tabConnection" style="margin-top:16px">
       <div class="notice" id="liveSupport">正在检测浏览器蓝牙能力…</div>
-      <section id="tabPanelControl" role="tabpanel" aria-labelledby="tabControl" style="margin-top:16px">
-      <div class="panel"><h2>设备连接</h2><p id="liveDevice" class="sub">尚未选择设备</p>
+      <div class="panel" style="margin-top:16px"><h2>设备连接</h2><p id="liveDevice" class="sub">尚未选择设备</p>
         <label for="liveProtocol">报文协议</label><select id="liveProtocol"><option value="auto">自动识别（推荐）</option><option value="2">新版 @%PD</option><option value="1">旧版数字帧</option></select>
         <p class="footer">自动识别依赖设备通知；若没有通知，可手动选择。无法确认协议时不会发送密码。</p>
         <div class="actions"><button id="liveRestore" class="primary" type="button" disabled>一键连接上次设备</button><button id="liveChoose" class="secondary" type="button">选择 / 更换设备</button><button id="liveDisconnect" class="secondary" type="button">断开连接</button></div>
@@ -62,6 +60,9 @@
         <label class="check"><input id="rememberPassword" type="checkbox" checked>验证成功后保存在 Bluefy 的网站本地存储，下次自动发送</label>
         <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
       </div>
+      <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
+      </section>
+      <section id="tabPanelCharge" role="tabpanel" aria-labelledby="tabCharge" style="margin-top:16px" hidden>
       <div class="hero"><span class="status good">真机状态 · 需设备通知</span><h2 id="liveState">等候设备实时状态</h2><p id="liveFreshness">尚未收到设备状态</p>
         <div class="metrics"><div class="metric"><strong id="liveSoc">--</strong><span>SOC</span></div><div class="metric"><strong id="liveEnergy">--</strong><span>已充电量</span></div><div class="metric"><strong id="liveMinutes">--</strong><span>已充时长</span></div></div></div>
       <div class="panel"><h2>充电操作</h2><p class="sub" id="liveElectrical">无设备数据</p>
@@ -69,8 +70,6 @@
         <div class="actions"><button class="secondary" id="liveUnlock" type="button" disabled>解除电子锁</button><button class="secondary" id="liveRefresh" type="button" disabled>同步时钟并刷新状态</button></div>
         <p class="footer">充停需实时状态满足旧应用中的条件；发出后需等待设备确认。刷新会发送设备时钟同步帧。</p>
       </div>
-      </section>
-      <section id="tabPanelReservation" role="tabpanel" aria-labelledby="tabReservation" style="margin-top:16px" hidden>
       <div class="panel" id="reservePanel"><h2>预约充电</h2><p class="sub">预约开始时间自动预填<strong>次日 00:00</strong>；不会自动提交，确认后才向设备发送。</p>
         <label for="reserveStart">预约开始（iPhone 本地时间）</label>
         <div class="reserve-date-control"><div class="reserve-date-frame"><input id="reserveStart" type="datetime-local" step="60" required></div>
@@ -83,19 +82,21 @@
         <div class="actions"><button class="primary" id="reserveSubmit" type="button" disabled>提交预约</button><button class="danger" id="reserveCancel" type="button" disabled>取消预约</button></div>
         <p class="footer">需在未来 24 小时内预约。提交条件按原小程序：插枪、未在充电中、未启用即插即充或无感充电、设备处于充电准备状态；不额外要求电子锁状态。旧应用选择 100 度时实际编码为 99 度，故此处最高 99 度。仅设备确认后视为提交成功；网页不会在后台定时发送开始指令。</p>
       </div>
+      <div class="notice">尚未与真实充电桩及 Bluefy 联调。首次预约请在设备旁核对设备回执、预约开始时间和结束方式；收到提交回执不等于预约已按时执行。</div>
       </section>
       <section id="tabPanelFeedback" role="tabpanel" aria-labelledby="tabFeedback" style="margin-top:16px" hidden>
-      <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
       <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="log" aria-live="off" aria-label="设备反馈，最近一百条，可滚动">暂无设备反馈</div><p class="footer">本页保留最近 100 条，相邻同文案合并为 +N；重复状态通知最多每 30 秒重绘一次，状态本身仍随设备通知更新。</p></div>
       <div class="panel"><h2>诊断日志</h2><p class="sub">仅保存在此浏览器的网站数据中，最多保留最近 160 条。导出前仍请自行检查内容；不会采集原始蓝牙报文、验证码或设备 ID。</p>
         <div class="actions"><button class="primary" id="copyDiagnostics" type="button">复制日志</button><button class="secondary" id="selectDiagnostics" type="button">选中日志</button></div>
         <label for="diagnosticsText">可直接长按全选并复制</label><textarea id="diagnosticsText" readonly spellcheck="false" aria-label="可复制的脱敏诊断日志"></textarea>
         <div class="actions"><button class="danger" id="clearDiagnostics" type="button">清空日志</button></div><p class="footer" id="diagnosticsHint">如浏览器禁止自动复制，可长按上方文本手动复制。</p>
       </div>
-      <div class="notice">尚未与真实充电桩及 Bluefy 联调。首次预约请在设备旁核对设备回执、预约开始时间和结束方式；收到提交回执不等于预约已按时执行。</div>
+      </section>
+      <section id="tabPanelAbout" role="tabpanel" aria-labelledby="tabAbout" style="margin-top:16px" hidden>
+        <div class="panel"><h2>WattSaving · 充电桩控制</h2><p class="sub">个人用网页 · 非官方产品</p><p class="sub">真机控制 · 尚待实机验证</p><p class="footer build-info" id="buildInfo">版本信息未载入</p></div>
       </section>
     </div>
   </section></main>
-  <script defer src="./app.js?v=feedback-tabs-v1"></script>
+  <script defer src="./app.js?v=sticky-tabs-about-v1"></script>
 </body>
 </html>

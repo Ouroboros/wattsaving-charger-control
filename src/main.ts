@@ -154,7 +154,12 @@ function render(): void {
   text("liveDevice", device ? `${device.name || "未命名设备"} · ${client?.authorized ? "已授权" : "未授权"}` :
     client?.rememberedName ? `上次设备：${client.rememberedName}（未连接）` : "尚未选择设备");
   text("liveState", client?.authorized ? stateName(status) : "未取得设备实时状态");
-  text("livePhase", client?.authorized ? "已授权" : phase === "offline" ? "未连接" : phase === "password" ? "待输入密码" : phase === "authenticating" ? "等设备确认" : "连接中");
+  const connected = !!device?.gatt?.connected;
+  const connectionLabel = client?.authorized ? "已连接，已授权" : connected ? "已连接，未授权" : phase === "connecting" ? "连接中" : "未连接";
+  const indicator = el("livePhase");
+  indicator.className = `connection-dot${connected ? " connected" : ""}`;
+  indicator.setAttribute("aria-label", connectionLabel);
+  indicator.title = connectionLabel;
   text("liveProtocolName", client?.currentProtocol === 1 ? "旧版协议" : client?.currentProtocol === 2 ? "新版协议" : "等待识别");
   text("liveSoc", status && Number.isFinite(status.soc) ? `${status.soc}%` : "--");
   text("liveEnergy", status && Number.isFinite(status.energyKWh) ? `${status.energyKWh.toFixed(1)} kWh` : "--");
@@ -339,9 +344,10 @@ el("clearDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
 const tabPairs = ([
-  ["tabControl", "tabPanelControl"],
-  ["tabReservation", "tabPanelReservation"],
-  ["tabFeedback", "tabPanelFeedback"]
+  ["tabConnection", "tabPanelConnection"],
+  ["tabCharge", "tabPanelCharge"],
+  ["tabFeedback", "tabPanelFeedback"],
+  ["tabAbout", "tabPanelAbout"]
 ] as const).map(([tabId, panelId]) => ({ tab: el<HTMLButtonElement>(tabId), panel: el(panelId) }));
 tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
 el("liveTabs").addEventListener("keydown", event => {
