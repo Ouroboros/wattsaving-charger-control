@@ -28,7 +28,7 @@ interface Vault { lastId: string; devices: Record<string, StoredDevice>; }
 type Phase = "offline" | "connecting" | "detecting" | "password" | "authenticating" | "ready";
 export type ChargerEvent =
   | { type: "phase"; phase: Phase; message: string }
-  | { type: "notice"; message: string }
+  | { type: "notice"; message: string; severity?: "error" }
   | { type: "protocol"; version: Version; source: string }
   | { type: "status"; status: DeviceStatus }
   | { type: "reservation"; action: ReservationAction; message: string }
@@ -120,6 +120,7 @@ export class ChargerClient {
   private protocol: Version | null = null;
   private phase: Phase = "offline";
   private connectionStage = "offline";
+  private connectionSource: "chooser" | "current-page" | "browser-grants" | "direct" = "direct";
   private stageAt = 0;
   private attempt = 0;
   private attemptStartedAt = 0;
@@ -170,7 +171,7 @@ export class ChargerClient {
     try { localStorage.setItem(KEY, JSON.stringify(vault)); return true; }
     catch {
       this.diagnose("device-storage-error", { operation: "write" }, "warn");
-      this.emit({ type: "notice", message: "浏览器未允许本地存储；本次设备和密码不会在下次打开时保留。" });
+      this.emit({ type: "notice", message: "浏览器未允许本地存储；本次设备和密码不会在下次打开时保留。", severity: "error" });
       return false;
     }
   }
@@ -203,10 +204,12 @@ export class ChargerClient {
       this.diagnose("restore-skipped", { reason: !id ? "no-record" : "control-disabled", remembered: !!id });
       return false;
     }
+    let attemptedConnection = false;
     try {
       const inPage = this.recentDevice?.id === id ? this.recentDevice : null;
       if (inPage) {
         this.diagnose("restore-source", { source: "current-page" });
+        attemptedConnection = true;
         await this.connect(inPage, undefined, "current-page");
         return true;
       }
@@ -223,11 +226,13 @@ export class ChargerClient {
         return false;
       }
       this.diagnose("restore-source", { source: "browser-grants" });
+      attemptedConnection = true;
       await this.connect(remembered, undefined, "browser-grants");
       return true;
     } catch (error) {
       this.diagnose("restore-error", diagnosticError(error), "warn");
-      this.emit({ type: "notice", message: `恢复上次设备失败：${message(error)}；请点击选择设备。` });
+      this.emit({ type: "notice", message: `恢复上次设备失败：${message(error)}；请点击选择设备。`,
+        ...(attemptedConnection ? {} : { severity: "error" as const }) });
       return false;
     }
   }
@@ -247,6 +252,7 @@ export class ChargerClient {
     const epoch = this.epoch;
     this.device = device;
     const attempt = ++this.attempt;
+    this.connectionSource = source;
     const startedAt = Date.now();
     this.attemptStartedAt = startedAt;
     let stage = "gatt", stageAt = startedAt;
@@ -405,7 +411,8 @@ export class ChargerClient {
       this.diagnose("gatt-connect-error", { attempt, stage, elapsedMs: Date.now() - startedAt,
         stageMs: Math.max(0, Date.now() - stageAt), page: pageVisibility(), connected: !!device.gatt?.connected,
         ...diagnosticError(error) }, "error");
-      if (epoch === this.epoch) { this.disconnect("connect-error"); this.emit({ type: "notice", message: `连接失败：${message(error)}` }); }
+      if (epoch === this.epoch) { this.disconnect("connect-error"); this.emit({ type: "notice", message: `连接失败：${message(error)}`,
+        ...(source === "chooser" ? {} : { severity: "error" as const }) }); }
       throw error;
     }
   }
@@ -427,6 +434,7 @@ export class ChargerClient {
         this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
         this.forgetPassword();
         this.setPhase("password", `自动授权失败：${message(error)}`);
+        this.emit({ type: "notice", message: "自动授权失败，请重新输入蓝牙验证码。", severity: "error" });
         this.emit({ type: "auth-needed", message: "请重新输入蓝牙验证码。" });
       });
     } else {
@@ -555,7 +563,7 @@ export class ChargerClient {
       this.diagnose("auth-saved", { remembered: pending.remember, persisted, version: this.protocol });
       this.setPhase("ready", "设备确认授权成功；可以读取状态并控制。" );
       pending.resolve();
-      void this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}` }));
+      void this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}`, severity: "error" }));
       return;
     }
     if (frame.type === "reservation") {
@@ -627,8 +635,11 @@ export class ChargerClient {
       pendingReservation: !!this.pendingReservation, notifications: this.rxNotifications }, "warn");
     this.diagnose("disconnect-rx-summary", { attempt: this.attempt, notifications: this.rxNotifications,
       totalBytes: this.rxBytes, parsed: this.decodedFrames, unknown: this.unknownFrames, statuses: this.statusFrames });
+    const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation);
+    const chooserStillConnecting = this.connectionSource === "chooser" && this.phase === "connecting";
     this.disconnect("gatt-event");
-    this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。" });
+    this.emit({ type: "notice", message: "设备已断线；页面数据不再视为实时。",
+      ...(waitingForOperation || chooserStillConnecting ? {} : { severity: "error" as const }) });
   };
   disconnect(reason: "user" | "replace-connection" | "connect-error" | "gatt-event" | "forget-device" = "user"): void {
     const context = { attempt: this.attempt, phase: this.phase, page: pageVisibility(),

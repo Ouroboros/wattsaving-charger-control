@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer } from "../src/ble";
+import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer, type ChargerEvent } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
 import { nextMidnight } from "../src/protocol";
 
@@ -382,9 +382,11 @@ test("GATT 建连前失败记录来源、阶段和安全错误类别，不导出
   const device = new FakeDevice("private-device-id");
   device.gatt.connect = async () => { throw new DOMException("Bluetooth powered off private-device-id", "NetworkError"); };
   const log = new Diagnostics(null);
-  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+  const events: ChargerEvent[] = [];
+  const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event), () => true,
     (event, data, level) => log.add(event, data, level));
   await assert.rejects(client.chooseDevice(), /powered off/);
+  assert.ok(events.some(event => event.type === "notice" && event.message.startsWith("连接失败") && event.severity === undefined));
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-start" && entry.data.attempt === 1 && entry.data.source === "chooser" && entry.data.lastState === "unavailable"));
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.stage === "gatt" && entry.data.kind === "NetworkError" && entry.data.reason === "bluetooth-off" && typeof entry.data.elapsedMs === "number"));
   assert.ok(log.recent.some(entry => entry.event === "disconnect" && entry.data.reason === "connect-error" && entry.data.connected === false && entry.data.lastState === "unavailable"));
@@ -421,11 +423,24 @@ test("查询服务时断线会中止扫描，不再误报后续服务或特征�
   assert.equal(client.currentDevice, null);
   assert.equal(log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" }).includes(device.id), false);
 });
+test("恢复阶段浏览器授权查询失败会生成一次可弹框的错误通知", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const first = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await first.chooseDevice(2);
+  first.disconnect();
+  const events: ChargerEvent[] = [];
+  const restored = new ChargerClient({ requestDevice: async () => device,
+    getDevices: async () => { throw new DOMException("Bluetooth off", "NetworkError"); } }, event => events.push(event));
+  assert.equal(await restored.restore(), false);
+  assert.equal(events.filter(event => event.type === "notice" && event.severity === "error").length, 1);
+});
 test("充电状态下断线和本页重连失败只记录上次状态及耗时，不泄露设备资料", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("private-charging-device-id");
   const log = new Diagnostics(null);
-  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+  const events: ChargerEvent[] = [];
+  const client = new ChargerClient({ requestDevice: async () => device }, event => events.push(event), () => true,
     (event, data, level) => log.add(event, data, level));
   await client.chooseDevice(2);
   await client.login("54321", false); await tick();
@@ -436,6 +451,7 @@ test("充电状态下断线和本页重连失败只记录上次状态及耗时�
   device.gatt.connected = false;
   device.dispatchEvent(new Event("gattserverdisconnected"));
   await assert.rejects(pendingStop, /结果未知/);
+  assert.ok(events.some(event => event.type === "notice" && event.message.startsWith("设备已断线") && event.severity === undefined));
   const disconnect = log.recent.find(entry => entry.event === "unexpected-disconnect");
   assert.equal(disconnect?.data.phase, "ready");
   assert.equal(disconnect?.data.lastState, "4");
@@ -450,6 +466,7 @@ test("充电状态下断线和本页重连失败只记录上次状态及耗时�
   device.dispatchEvent(new Event("gattserverdisconnected"));
   rejectService(new Error("private-charging-device-id service failed"));
   assert.equal(await retry, false);
+  assert.equal(events.filter(event => event.type === "notice" && event.severity === "error").length, 1);
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-start" && entry.data.attempt === 2 && entry.data.source === "current-page" && entry.data.lastState === "4" && typeof entry.data.statusAgeMs === "number"));
   assert.ok(log.recent.some(entry => entry.event === "service-query-finish" && entry.data.attempt === 2 && entry.data.outcome === "interrupted"));
   assert.ok(log.recent.some(entry => entry.event === "gatt-connect-error" && entry.data.attempt === 2 && entry.data.stage === "service-ff00"));

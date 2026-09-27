@@ -1,5 +1,7 @@
 import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEvent } from "./ble";
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
+import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
+import { showTab, tabIndexForKey } from "./tabs";
 
 declare const __BUILD_VERSION__: string;
 declare const __BUILD_REVISION__: string;
@@ -29,7 +31,10 @@ let reservationResult = "";
 let lastBlockedReservation = "";
 let reservationStartAutomatic = true;
 let confirmedReservation: { deviceId: string; startsAt: number } | null = null;
-const recentMessages: string[] = [];
+const feedback = new FeedbackHistory(100);
+let lastFeedbackPaintAt = 0;
+let feedbackDirty = false;
+let errorDialogs = 0;
 const pad = (value: number): string => String(value).padStart(2, "0");
 function localMinute(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -88,17 +93,31 @@ const stateName = (status: DeviceStatus | null): string => {
   if (status.state === "5") return "充电结束（原小程序标为 ChargEnd）";
   return `设备状态 ${status.state || "未知"}（含义未核实）`;
 };
-function record(message: string): void {
-  // 页面短暂展示用户反馈；不把自由文本写进可导出的诊断日志，避免设备名混入日志。
-  recentMessages.unshift(message);
-  if (recentMessages.length > 6) recentMessages.length = 6;
-  text("liveLog", recentMessages.join("\n"));
+function paintFeedback(): void {
+  const box = el("liveLog");
+  const followLatest = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+  // 自由文本仅显示在页面中，不进入可导出的脱敏诊断日志。
+  box.textContent = feedback.toText() || "暂无设备反馈";
+  if (followLatest) box.scrollTop = box.scrollHeight;
+  lastFeedbackPaintAt = Date.now();
+  feedbackDirty = false;
 }
+function record(message: string, throttleStatus = false): void {
+  const now = Date.now();
+  const repeated = feedback.add(message, now);
+  if (throttleStatus && !shouldPaintStatusFeedback(repeated, now, lastFeedbackPaintAt)) {
+    feedbackDirty = true;
+    return;
+  }
+  paintFeedback();
+}
+function showErrorModal(message: string): void { errorDialogs++; window.alert(message); }
+function reportOperationError(message: string): void { record(message); showErrorModal(message); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function failure(action: string, error: unknown): void {
   diagnostics.add("ui-error", { action, ...diagnosticError(error) }, "error");
   refreshDiagnostics();
-  record(`${action}失败：${errorMessage(error)}`);
+  reportOperationError(`${action}失败：${errorMessage(error)}`);
 }
 function handleEvent(event: ChargerEvent): void {
   if (event.type === "phase") {
@@ -106,18 +125,19 @@ function handleEvent(event: ChargerEvent): void {
     if (phase === "offline" || phase === "connecting") reservationResult = "";
     diagnostics.add("phase", { phase }); record(event.message);
   }
-  if (event.type === "notice") record(event.message);
+  if (event.type === "notice") { record(event.message); if (event.severity === "error") showErrorModal(event.message); }
   if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
   if (event.type === "status") {
     if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
-    statusAt = Date.now(); staleLoggedFor = 0; record("收到设备状态通知。");
+    statusAt = Date.now(); staleLoggedFor = 0; record("收到设备状态通知。", true);
   }
   refreshDiagnostics();
   render();
 }
 function render(): void {
+  if (feedbackDirty && Date.now() - lastFeedbackPaintAt >= STATUS_FEEDBACK_INTERVAL_MS) paintFeedback();
   const supported = !!adapter && window.isSecureContext;
   text("liveSupport", !window.isSecureContext ? "当前不是安全上下文，Web Bluetooth 不可用；请从 Bluefy 打开 HTTPS GitHub Pages 地址。" :
     !adapter ? "浏览器未提供 Web Bluetooth。请在 iPhone 的 Bluefy 中打开已发布的 HTTPS 页面。" : "检测到 Web Bluetooth API；仍需实际设备授权与通信测试。");
@@ -177,11 +197,17 @@ async function reconnectLast(source: "button" | "auto"): Promise<void> {
   if (!client || busy) return;
   diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
   busy = true; render();
+  const dialogsBefore = errorDialogs;
   try {
     const found = await client.restore();
     diagnostics.add("restore-finish", { source, discovered: found });
-    if (!found) record("Bluefy 未返回上次设备的浏览器授权；网页不能仅凭名称或 ID 连接，请用「选择 / 更换设备」重新授权。");
-  } finally { busy = false; render(); }
+    if (!found && errorDialogs === dialogsBefore) {
+      const explanation = "Bluefy 未返回上次设备的浏览器授权；网页不能仅凭名称或 ID 连接，请用「选择 / 更换设备」重新授权。";
+      record(explanation);
+      if (source === "button") showErrorModal(explanation);
+    }
+  } catch (error) { failure("恢复设备", error); }
+  finally { busy = false; render(); }
 }
 el("liveRestore").addEventListener("click", () => { void reconnectLast("button"); });
 el("liveProtocol").addEventListener("change", () => {
@@ -194,7 +220,7 @@ el("liveAuthorize").addEventListener("click", () => {
   if (!client) return;
   const input = el<HTMLInputElement>("livePassword");
   const password = input.value;
-  if (!/^\d{5}$/.test(password)) { diagnostics.add("auth-input-invalid"); record("蓝牙验证码必须是五位数字。"); return; }
+  if (!/^\d{5}$/.test(password)) { diagnostics.add("auth-input-invalid"); reportOperationError("蓝牙验证码必须是五位数字。"); return; }
   input.value = "";
   const remember = el<HTMLInputElement>("rememberPassword").checked;
   void client.login(password, remember).catch(error => failure("授权", error));
@@ -214,7 +240,7 @@ async function control(action: ControlAction): Promise<void> {
     const blocked = s.gunFlag === "1" ? "请先插枪" : s.selfStartFlag === "2" ? "请先取消即插即充功能" :
       s.mode === "3" ? "请先取消预约充电" : s.state !== "2" ? "请先拔枪再插枪" : null;
     diagnostics.add("control-gate", { action, allowed: !blocked, state: s.state, gun: s.gunFlag, mode: s.mode, selfStart: s.selfStartFlag });
-    if (blocked) { record(blocked); refreshDiagnostics(); return; }
+    if (blocked) { reportOperationError(`无法${name}：${blocked}`); refreshDiagnostics(); return; }
   }
   if (!window.confirm(`确定向真实充电桩发送「${name}」指令？\n收到设备状态变化后才会显示完成。`)) {
     diagnostics.add("ui-cancelled", { action }); refreshDiagnostics(); return;
@@ -243,11 +269,11 @@ async function reserve(action: "submit" | "cancel"): Promise<void> {
       const blocked = reservationBlockReason(status);
       diagnostics.add("reservation-ui-gate", { allowed: !blocked, state: status.state, gun: status.gunFlag,
         lock: status.lock, mode: status.mode, selfStart: status.selfStartFlag });
-      if (blocked) { lastBlockedReservation = blocked; reservationResult = blocked; record(blocked); refreshDiagnostics(); render(); return; }
+      if (blocked) { lastBlockedReservation = blocked; reservationResult = blocked; reportOperationError(blocked); refreshDiagnostics(); render(); return; }
       lastBlockedReservation = "";
     }
     try { reservation = selectedReservation(); }
-    catch (error) { diagnostics.add("reservation-input-error", diagnosticError(error), "warn"); reservationResult = errorMessage(error); record(reservationResult); render(); return; }
+    catch (error) { diagnostics.add("reservation-input-error", diagnosticError(error), "warn"); reservationResult = errorMessage(error); reportOperationError(`预约输入错误：${reservationResult}`); render(); return; }
   }
   const label = action === "submit" ? "提交预约" : "取消预约";
   const detail = reservation ? `\n开始：${localMinute(reservation.start).replace("T", " ")}（iPhone 本地时间）\n结束：${endLabel(reservation.end)}` : "";
@@ -297,6 +323,7 @@ el("copyDiagnostics").addEventListener("click", async () => {
     try { copied = document.execCommand("copy"); } catch { /* Bluefy 可能禁止自动复制 */ }
     text("diagnosticsHint", copied ? "日志已复制（兼容方式）。" : "浏览器禁止自动复制；请长按上方文本，全选后手动复制。");
     diagnostics.add("log-copy-fallback", { copied }, copied ? "info" : "warn");
+    if (!copied) reportOperationError("复制日志失败：请长按日志文本，手动全选并复制。");
   }
 });
 el("selectDiagnostics").addEventListener("click", () => {
@@ -306,11 +333,26 @@ el("selectDiagnostics").addEventListener("click", () => {
   text("diagnosticsHint", "已选中日志；可以使用浏览器复制菜单。若未选中，请长按文本手动全选。");
 });
 el("clearDiagnostics").addEventListener("click", () => {
-  if (!window.confirm("清空此浏览器保存的诊断日志？不会删除已保存的设备和验证码。")) return;
-  diagnostics.clear(); recentMessages.length = 0; text("liveLog", "诊断日志已清空。");
+  diagnostics.clear(); feedback.clear(); feedbackDirty = false; lastFeedbackPaintAt = 0;
+  text("liveLog", "暂无设备反馈"); el("liveLog").scrollTop = 0;
   refreshDiagnostics(true);
   text("diagnosticsHint", "日志已清空。新的设备事件会重新开始记录。");
 });
+const tabPairs = ([
+  ["tabControl", "tabPanelControl"],
+  ["tabReservation", "tabPanelReservation"],
+  ["tabFeedback", "tabPanelFeedback"]
+] as const).map(([tabId, panelId]) => ({ tab: el<HTMLButtonElement>(tabId), panel: el(panelId) }));
+tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
+el("liveTabs").addEventListener("keydown", event => {
+  const current = tabPairs.findIndex(({ tab }) => tab === event.target);
+  const next = tabIndexForKey(event.key, current, tabPairs.length);
+  if (next === null) return;
+  event.preventDefault();
+  showTab(tabPairs, next);
+  tabPairs[next].tab.focus();
+});
+showTab(tabPairs, 0);
 resetReservationStart();
 diagnostics.add("app-start", { ...environment(), schema: 4,
   buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeLocal: formatLocalBuildTime(__BUILD_TIME__) });

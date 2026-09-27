@@ -343,6 +343,7 @@
       __publicField(this, "protocol", null);
       __publicField(this, "phase", "offline");
       __publicField(this, "connectionStage", "offline");
+      __publicField(this, "connectionSource", "direct");
       __publicField(this, "stageAt", 0);
       __publicField(this, "attempt", 0);
       __publicField(this, "attemptStartedAt", 0);
@@ -379,8 +380,14 @@
           unknown: this.unknownFrames,
           statuses: this.statusFrames
         });
+        const waitingForOperation = !!(this.pendingAuth || this.pendingControl || this.pendingReservation);
+        const chooserStillConnecting = this.connectionSource === "chooser" && this.phase === "connecting";
         this.disconnect("gatt-event");
-        this.emit({ type: "notice", message: "\u8BBE\u5907\u5DF2\u65AD\u7EBF\uFF1B\u9875\u9762\u6570\u636E\u4E0D\u518D\u89C6\u4E3A\u5B9E\u65F6\u3002" });
+        this.emit({
+          type: "notice",
+          message: "\u8BBE\u5907\u5DF2\u65AD\u7EBF\uFF1B\u9875\u9762\u6570\u636E\u4E0D\u518D\u89C6\u4E3A\u5B9E\u65F6\u3002",
+          ...waitingForOperation || chooserStillConnecting ? {} : { severity: "error" }
+        });
       });
       this.adapter = adapter2;
       this.emit = emit;
@@ -438,7 +445,7 @@
         return true;
       } catch {
         this.diagnose("device-storage-error", { operation: "write" }, "warn");
-        this.emit({ type: "notice", message: "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u5B58\u50A8\uFF1B\u672C\u6B21\u8BBE\u5907\u548C\u5BC6\u7801\u4E0D\u4F1A\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u4FDD\u7559\u3002" });
+        this.emit({ type: "notice", message: "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u5B58\u50A8\uFF1B\u672C\u6B21\u8BBE\u5907\u548C\u5BC6\u7801\u4E0D\u4F1A\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u4FDD\u7559\u3002", severity: "error" });
         return false;
       }
     }
@@ -480,10 +487,12 @@
         this.diagnose("restore-skipped", { reason: !id ? "no-record" : "control-disabled", remembered: !!id });
         return false;
       }
+      let attemptedConnection = false;
       try {
         const inPage = this.recentDevice?.id === id ? this.recentDevice : null;
         if (inPage) {
           this.diagnose("restore-source", { source: "current-page" });
+          attemptedConnection = true;
           await this.connect(inPage, void 0, "current-page");
           return true;
         }
@@ -500,11 +509,16 @@
           return false;
         }
         this.diagnose("restore-source", { source: "browser-grants" });
+        attemptedConnection = true;
         await this.connect(remembered, void 0, "browser-grants");
         return true;
       } catch (error) {
         this.diagnose("restore-error", diagnosticError(error), "warn");
-        this.emit({ type: "notice", message: `\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u5931\u8D25\uFF1A${message(error)}\uFF1B\u8BF7\u70B9\u51FB\u9009\u62E9\u8BBE\u5907\u3002` });
+        this.emit({
+          type: "notice",
+          message: `\u6062\u590D\u4E0A\u6B21\u8BBE\u5907\u5931\u8D25\uFF1A${message(error)}\uFF1B\u8BF7\u70B9\u51FB\u9009\u62E9\u8BBE\u5907\u3002`,
+          ...attemptedConnection ? {} : { severity: "error" }
+        });
         return false;
       }
     }
@@ -527,6 +541,7 @@
       const epoch = this.epoch;
       this.device = device;
       const attempt = ++this.attempt;
+      this.connectionSource = source;
       const startedAt = Date.now();
       this.attemptStartedAt = startedAt;
       let stage = "gatt", stageAt = startedAt;
@@ -763,7 +778,11 @@
         }, "error");
         if (epoch === this.epoch) {
           this.disconnect("connect-error");
-          this.emit({ type: "notice", message: `\u8FDE\u63A5\u5931\u8D25\uFF1A${message(error)}` });
+          this.emit({
+            type: "notice",
+            message: `\u8FDE\u63A5\u5931\u8D25\uFF1A${message(error)}`,
+            ...source === "chooser" ? {} : { severity: "error" }
+          });
         }
         throw error;
       }
@@ -786,6 +805,7 @@
           this.diagnose("auth-cached-failed", diagnosticError(error), "warn");
           this.forgetPassword();
           this.setPhase("password", `\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF1A${message(error)}`);
+          this.emit({ type: "notice", message: "\u81EA\u52A8\u6388\u6743\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002", severity: "error" });
           this.emit({ type: "auth-needed", message: "\u8BF7\u91CD\u65B0\u8F93\u5165\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
         });
       } else {
@@ -941,7 +961,7 @@
         this.diagnose("auth-saved", { remembered: pending.remember, persisted, version: this.protocol });
         this.setPhase("ready", "\u8BBE\u5907\u786E\u8BA4\u6388\u6743\u6210\u529F\uFF1B\u53EF\u4EE5\u8BFB\u53D6\u72B6\u6001\u5E76\u63A7\u5236\u3002");
         pending.resolve();
-        void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}` }));
+        void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}`, severity: "error" }));
         return;
       }
       if (frame.type === "reservation") {
@@ -1113,6 +1133,62 @@
     return `\u7248\u672C v${info.version} \xB7 \u63D0\u4EA4 ${info.revision} \xB7 \u6784\u5EFA\uFF08\u672C\u5730\uFF09 ${formatLocalBuildTime(info.builtAt)}`;
   }
 
+  // src/feedback.ts
+  var STATUS_FEEDBACK_INTERVAL_MS = 3e4;
+  var pad3 = (value) => String(value).padStart(2, "0");
+  function feedbackTimestamp(at) {
+    const date = new Date(at);
+    return `${date.getFullYear()}-${pad3(date.getMonth() + 1)}-${pad3(date.getDate())} ${pad3(date.getHours())}:${pad3(date.getMinutes())}:${pad3(date.getSeconds())}`;
+  }
+  function shouldPaintStatusFeedback(repeated, now, lastPaintedAt) {
+    return !repeated || now < lastPaintedAt || now - lastPaintedAt >= STATUS_FEEDBACK_INTERVAL_MS;
+  }
+  var FeedbackHistory = class {
+    constructor(limit = 100) {
+      this.limit = limit;
+      __publicField(this, "entries", []);
+    }
+    add(message2, at = Date.now()) {
+      const last = this.entries[this.entries.length - 1];
+      if (last?.message === message2) {
+        last.at = at;
+        last.repeats++;
+        return true;
+      }
+      this.entries.push({ message: message2, at, repeats: 0 });
+      if (this.entries.length > this.limit) this.entries.shift();
+      return false;
+    }
+    clear() {
+      this.entries.length = 0;
+    }
+    get size() {
+      return this.entries.length;
+    }
+    toText() {
+      return this.entries.map(({ message: message2, at, repeats }) => `[${feedbackTimestamp(at)}] ${message2}${repeats ? ` +${repeats}` : ""}`).join("\n");
+    }
+  };
+
+  // src/tabs.ts
+  function showTab(pairs, selected) {
+    if (selected < 0 || selected >= pairs.length) throw new RangeError("\u672A\u77E5\u6807\u7B7E\u9875");
+    pairs.forEach(({ tab, panel }, index) => {
+      const active = index === selected;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      panel.hidden = !active;
+    });
+  }
+  function tabIndexForKey(key, current, count) {
+    if (count < 1 || current < 0 || current >= count) return null;
+    if (key === "ArrowRight") return (current + 1) % count;
+    if (key === "ArrowLeft") return (current + count - 1) % count;
+    if (key === "Home") return 0;
+    if (key === "End") return count - 1;
+    return null;
+  }
+
   // src/countdown.ts
   function countdownTo(startAtMs, nowMs = Date.now()) {
     if (!Number.isFinite(startAtMs) || !Number.isFinite(nowMs)) throw new Error("\u9884\u7EA6\u5012\u8BA1\u65F6\u7684\u65F6\u95F4\u65E0\u6548");
@@ -1132,7 +1208,7 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "31de8c7", builtAt: "2026-09-27T07:44:19.130Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "a4377d7", builtAt: "2026-09-27T08:30:15.383Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
@@ -1147,10 +1223,13 @@
   var lastBlockedReservation = "";
   var reservationStartAutomatic = true;
   var confirmedReservation = null;
-  var recentMessages = [];
-  var pad3 = (value) => String(value).padStart(2, "0");
+  var feedback = new FeedbackHistory(100);
+  var lastFeedbackPaintAt = 0;
+  var feedbackDirty = false;
+  var errorDialogs = 0;
+  var pad4 = (value) => String(value).padStart(2, "0");
   function localMinute(date) {
-    return `${date.getFullYear()}-${pad3(date.getMonth() + 1)}-${pad3(date.getDate())}T${pad3(date.getHours())}:${pad3(date.getMinutes())}`;
+    return `${date.getFullYear()}-${pad4(date.getMonth() + 1)}-${pad4(date.getDate())}T${pad4(date.getHours())}:${pad4(date.getMinutes())}`;
   }
   function resetReservationStart() {
     reservationStartAutomatic = true;
@@ -1208,10 +1287,30 @@
     if (status2.state === "5") return "\u5145\u7535\u7ED3\u675F\uFF08\u539F\u5C0F\u7A0B\u5E8F\u6807\u4E3A ChargEnd\uFF09";
     return `\u8BBE\u5907\u72B6\u6001 ${status2.state || "\u672A\u77E5"}\uFF08\u542B\u4E49\u672A\u6838\u5B9E\uFF09`;
   };
-  function record(message2) {
-    recentMessages.unshift(message2);
-    if (recentMessages.length > 6) recentMessages.length = 6;
-    text("liveLog", recentMessages.join("\n"));
+  function paintFeedback() {
+    const box = el("liveLog");
+    const followLatest = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+    box.textContent = feedback.toText() || "\u6682\u65E0\u8BBE\u5907\u53CD\u9988";
+    if (followLatest) box.scrollTop = box.scrollHeight;
+    lastFeedbackPaintAt = Date.now();
+    feedbackDirty = false;
+  }
+  function record(message2, throttleStatus = false) {
+    const now = Date.now();
+    const repeated = feedback.add(message2, now);
+    if (throttleStatus && !shouldPaintStatusFeedback(repeated, now, lastFeedbackPaintAt)) {
+      feedbackDirty = true;
+      return;
+    }
+    paintFeedback();
+  }
+  function showErrorModal(message2) {
+    errorDialogs++;
+    window.alert(message2);
+  }
+  function reportOperationError(message2) {
+    record(message2);
+    showErrorModal(message2);
   }
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
@@ -1219,7 +1318,7 @@
   function failure(action, error) {
     diagnostics.add("ui-error", { action, ...diagnosticError(error) }, "error");
     refreshDiagnostics();
-    record(`${action}\u5931\u8D25\uFF1A${errorMessage(error)}`);
+    reportOperationError(`${action}\u5931\u8D25\uFF1A${errorMessage(error)}`);
   }
   function handleEvent(event) {
     if (event.type === "phase") {
@@ -1228,7 +1327,10 @@
       diagnostics.add("phase", { phase });
       record(event.message);
     }
-    if (event.type === "notice") record(event.message);
+    if (event.type === "notice") {
+      record(event.message);
+      if (event.severity === "error") showErrorModal(event.message);
+    }
     if (event.type === "reservation") {
       reservationResult = event.message;
       record(event.message);
@@ -1239,12 +1341,13 @@
       if (lastBlockedReservation && reservationResult === lastBlockedReservation && reservationBlockReason(event.status) !== lastBlockedReservation) reservationResult = "";
       statusAt = Date.now();
       staleLoggedFor = 0;
-      record("\u6536\u5230\u8BBE\u5907\u72B6\u6001\u901A\u77E5\u3002");
+      record("\u6536\u5230\u8BBE\u5907\u72B6\u6001\u901A\u77E5\u3002", true);
     }
     refreshDiagnostics();
     render();
   }
   function render() {
+    if (feedbackDirty && Date.now() - lastFeedbackPaintAt >= STATUS_FEEDBACK_INTERVAL_MS) paintFeedback();
     const supported = !!adapter && window.isSecureContext;
     text("liveSupport", !window.isSecureContext ? "\u5F53\u524D\u4E0D\u662F\u5B89\u5168\u4E0A\u4E0B\u6587\uFF0CWeb Bluetooth \u4E0D\u53EF\u7528\uFF1B\u8BF7\u4ECE Bluefy \u6253\u5F00 HTTPS GitHub Pages \u5730\u5740\u3002" : !adapter ? "\u6D4F\u89C8\u5668\u672A\u63D0\u4F9B Web Bluetooth\u3002\u8BF7\u5728 iPhone \u7684 Bluefy \u4E2D\u6253\u5F00\u5DF2\u53D1\u5E03\u7684 HTTPS \u9875\u9762\u3002" : "\u68C0\u6D4B\u5230 Web Bluetooth API\uFF1B\u4ECD\u9700\u5B9E\u9645\u8BBE\u5907\u6388\u6743\u4E0E\u901A\u4FE1\u6D4B\u8BD5\u3002");
     el("liveSupport").className = `notice ${supported ? "light" : ""}`;
@@ -1304,10 +1407,17 @@
     diagnostics.add("restore-request", { source, remembered: !!client.rememberedName, getDevices: !!adapter?.getDevices });
     busy = true;
     render();
+    const dialogsBefore = errorDialogs;
     try {
       const found = await client.restore();
       diagnostics.add("restore-finish", { source, discovered: found });
-      if (!found) record("Bluefy \u672A\u8FD4\u56DE\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\uFF1B\u7F51\u9875\u4E0D\u80FD\u4EC5\u51ED\u540D\u79F0\u6216 ID \u8FDE\u63A5\uFF0C\u8BF7\u7528\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u91CD\u65B0\u6388\u6743\u3002");
+      if (!found && errorDialogs === dialogsBefore) {
+        const explanation = "Bluefy \u672A\u8FD4\u56DE\u4E0A\u6B21\u8BBE\u5907\u7684\u6D4F\u89C8\u5668\u6388\u6743\uFF1B\u7F51\u9875\u4E0D\u80FD\u4EC5\u51ED\u540D\u79F0\u6216 ID \u8FDE\u63A5\uFF0C\u8BF7\u7528\u300C\u9009\u62E9 / \u66F4\u6362\u8BBE\u5907\u300D\u91CD\u65B0\u6388\u6743\u3002";
+        record(explanation);
+        if (source === "button") showErrorModal(explanation);
+      }
+    } catch (error) {
+      failure("\u6062\u590D\u8BBE\u5907", error);
     } finally {
       busy = false;
       render();
@@ -1332,7 +1442,7 @@
     const password = input.value;
     if (!/^\d{5}$/.test(password)) {
       diagnostics.add("auth-input-invalid");
-      record("\u84DD\u7259\u9A8C\u8BC1\u7801\u5FC5\u987B\u662F\u4E94\u4F4D\u6570\u5B57\u3002");
+      reportOperationError("\u84DD\u7259\u9A8C\u8BC1\u7801\u5FC5\u987B\u662F\u4E94\u4F4D\u6570\u5B57\u3002");
       return;
     }
     input.value = "";
@@ -1356,7 +1466,7 @@
       const blocked = s.gunFlag === "1" ? "\u8BF7\u5148\u63D2\u67AA" : s.selfStartFlag === "2" ? "\u8BF7\u5148\u53D6\u6D88\u5373\u63D2\u5373\u5145\u529F\u80FD" : s.mode === "3" ? "\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u5145\u7535" : s.state !== "2" ? "\u8BF7\u5148\u62D4\u67AA\u518D\u63D2\u67AA" : null;
       diagnostics.add("control-gate", { action, allowed: !blocked, state: s.state, gun: s.gunFlag, mode: s.mode, selfStart: s.selfStartFlag });
       if (blocked) {
-        record(blocked);
+        reportOperationError(`\u65E0\u6CD5${name}\uFF1A${blocked}`);
         refreshDiagnostics();
         return;
       }
@@ -1413,7 +1523,7 @@
         if (blocked) {
           lastBlockedReservation = blocked;
           reservationResult = blocked;
-          record(blocked);
+          reportOperationError(blocked);
           refreshDiagnostics();
           render();
           return;
@@ -1425,7 +1535,7 @@
       } catch (error) {
         diagnostics.add("reservation-input-error", diagnosticError(error), "warn");
         reservationResult = errorMessage(error);
-        record(reservationResult);
+        reportOperationError(`\u9884\u7EA6\u8F93\u5165\u9519\u8BEF\uFF1A${reservationResult}`);
         render();
         return;
       }
@@ -1503,6 +1613,7 @@
       }
       text("diagnosticsHint", copied ? "\u65E5\u5FD7\u5DF2\u590D\u5236\uFF08\u517C\u5BB9\u65B9\u5F0F\uFF09\u3002" : "\u6D4F\u89C8\u5668\u7981\u6B62\u81EA\u52A8\u590D\u5236\uFF1B\u8BF7\u957F\u6309\u4E0A\u65B9\u6587\u672C\uFF0C\u5168\u9009\u540E\u624B\u52A8\u590D\u5236\u3002");
       diagnostics.add("log-copy-fallback", { copied }, copied ? "info" : "warn");
+      if (!copied) reportOperationError("\u590D\u5236\u65E5\u5FD7\u5931\u8D25\uFF1A\u8BF7\u957F\u6309\u65E5\u5FD7\u6587\u672C\uFF0C\u624B\u52A8\u5168\u9009\u5E76\u590D\u5236\u3002");
     }
   });
   el("selectDiagnostics").addEventListener("click", () => {
@@ -1513,20 +1624,37 @@
     text("diagnosticsHint", "\u5DF2\u9009\u4E2D\u65E5\u5FD7\uFF1B\u53EF\u4EE5\u4F7F\u7528\u6D4F\u89C8\u5668\u590D\u5236\u83DC\u5355\u3002\u82E5\u672A\u9009\u4E2D\uFF0C\u8BF7\u957F\u6309\u6587\u672C\u624B\u52A8\u5168\u9009\u3002");
   });
   el("clearDiagnostics").addEventListener("click", () => {
-    if (!window.confirm("\u6E05\u7A7A\u6B64\u6D4F\u89C8\u5668\u4FDD\u5B58\u7684\u8BCA\u65AD\u65E5\u5FD7\uFF1F\u4E0D\u4F1A\u5220\u9664\u5DF2\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u9A8C\u8BC1\u7801\u3002")) return;
     diagnostics.clear();
-    recentMessages.length = 0;
-    text("liveLog", "\u8BCA\u65AD\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002");
+    feedback.clear();
+    feedbackDirty = false;
+    lastFeedbackPaintAt = 0;
+    text("liveLog", "\u6682\u65E0\u8BBE\u5907\u53CD\u9988");
+    el("liveLog").scrollTop = 0;
     refreshDiagnostics(true);
     text("diagnosticsHint", "\u65E5\u5FD7\u5DF2\u6E05\u7A7A\u3002\u65B0\u7684\u8BBE\u5907\u4E8B\u4EF6\u4F1A\u91CD\u65B0\u5F00\u59CB\u8BB0\u5F55\u3002");
   });
+  var tabPairs = [
+    ["tabControl", "tabPanelControl"],
+    ["tabReservation", "tabPanelReservation"],
+    ["tabFeedback", "tabPanelFeedback"]
+  ].map(([tabId, panelId]) => ({ tab: el(tabId), panel: el(panelId) }));
+  tabPairs.forEach(({ tab }, index) => tab.addEventListener("click", () => showTab(tabPairs, index)));
+  el("liveTabs").addEventListener("keydown", (event) => {
+    const current = tabPairs.findIndex(({ tab }) => tab === event.target);
+    const next = tabIndexForKey(event.key, current, tabPairs.length);
+    if (next === null) return;
+    event.preventDefault();
+    showTab(tabPairs, next);
+    tabPairs[next].tab.focus();
+  });
+  showTab(tabPairs, 0);
   resetReservationStart();
   diagnostics.add("app-start", {
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "31de8c7",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T07:44:19.130Z")
+    buildRevision: "a4377d7",
+    buildTimeLocal: formatLocalBuildTime("2026-09-27T08:30:15.383Z")
   });
   refreshDiagnostics(true);
   render();
