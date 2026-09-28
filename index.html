@@ -102,6 +102,12 @@
       </section>
       <section id="tabPanelFeedback" role="tabpanel" aria-labelledby="tabFeedback" style="margin-top:16px" hidden>
       <div class="panel"><h2>设备反馈</h2><div class="log" id="liveLog" role="log" aria-live="off" aria-label="设备反馈，最近一百条，可滚动">暂无设备反馈</div><p class="footer">本页保留最近 100 条，相邻同文案合并为 +N；重复状态通知最多每 30 秒重绘一次，状态本身仍随设备通知更新。</p></div>
+      <div class="panel"><h2>临时收发抓包</h2>
+        <div class="actions"><button class="primary" id="rawCaptureToggle" type="button">开始抓包</button><button class="secondary" id="rawCaptureClear" type="button" disabled>清空抓包</button></div>
+        <p class="sub" id="rawCaptureState" role="status" aria-live="polite">已停止 · 0 条</p>
+        <label for="rawCaptureText">蓝牙通知与写入尝试（HEX / ASCII）</label><textarea id="rawCaptureText" readonly spellcheck="false" aria-label="临时收发报文原文"></textarea>
+        <button class="secondary full" id="rawCaptureCopy" type="button" disabled>复制抓包</button><p class="footer" id="rawCaptureHint">仅当前页面内存保存；刷新清空。</p>
+      </div>
       <div class="panel"><h2>诊断日志</h2><p class="sub">仅保存在此浏览器的网站数据中，最多保留最近 160 条。导出前仍请自行检查内容；不会采集原始蓝牙报文、验证码或设备 ID。</p>
         <div class="actions"><button class="primary" id="copyDiagnostics" type="button">复制日志</button><button class="secondary" id="selectDiagnostics" type="button">选中日志</button></div>
         <label for="diagnosticsText">可直接长按全选并复制</label><textarea id="diagnosticsText" readonly spellcheck="false" aria-label="可复制的脱敏诊断日志"></textarea>
@@ -120,6 +126,6 @@
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=no-local-reservation-history-v5"></script>
+  <script defer src="./app.js?v=raw-capture-v6"></script>
 </body>
 </html>

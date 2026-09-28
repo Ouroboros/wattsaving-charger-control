@@ -1,6 +1,7 @@
 import { ChargerClient, reservationBlockReason, type BleAdapter, type ChargerEvent } from "./ble";
 import { formatBuildInfo, formatLocalBuildTime } from "./build-info";
 import { FeedbackHistory, shouldPaintStatusFeedback, STATUS_FEEDBACK_INTERVAL_MS } from "./feedback";
+import { RawCapture } from "./raw-capture";
 import type { ExperimentalQuery } from "./experimental";
 import { showTab, tabIndexForKey } from "./tabs";
 
@@ -20,11 +21,14 @@ const text = (id: string, value: string): void => { el(id).textContent = value; 
 text("buildInfo", formatBuildInfo({ version: __BUILD_VERSION__, revision: __BUILD_REVISION__, builtAt: __BUILD_TIME__ }));
 const adapter = (navigator as Navigator & { bluetooth?: BleAdapter }).bluetooth;
 const diagnostics = new Diagnostics();
+const rawCapture = new RawCapture();
 // 移除旧版网页生成的本地充电/预约记录；不影响设备和验证码存储。
 try { window.localStorage.removeItem("wattsaving-local-history-v1"); } catch { /* 浏览器本地存储不可用 */ }
 const client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
   diagnostics.add(event, data, level);
   refreshDiagnostics();
+}, (direction, bytes) => {
+  if (rawCapture.record(direction, bytes)) refreshRawCapture();
 }) : null;
 let phase = "offline";
 let busy = false;
@@ -90,6 +94,16 @@ function refreshDiagnostics(force = false): void {
   const area = el<HTMLTextAreaElement>("diagnosticsText");
   if (force || document.activeElement !== area) area.value = diagnostics.exportText(environment());
   if (!diagnostics.storageAvailable) text("diagnosticsHint", "浏览器未允许本地保存；关闭页面后日志可能丢失。请先复制上方文本。");
+}
+function refreshRawCapture(force = false): void {
+  const area = el<HTMLTextAreaElement>("rawCaptureText");
+  const followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 24;
+  if (force || document.activeElement !== area) area.value = rawCapture.toText();
+  if (followLatest) area.scrollTop = area.scrollHeight;
+  text("rawCaptureToggle", rawCapture.enabled ? "停止抓包" : "开始抓包");
+  text("rawCaptureState", `${rawCapture.enabled ? "抓包中" : "已停止"} · ${rawCapture.count} 条`);
+  el<HTMLButtonElement>("rawCaptureCopy").disabled = !rawCapture.count;
+  el<HTMLButtonElement>("rawCaptureClear").disabled = !rawCapture.count;
 }
 const stateName = (status: DeviceStatus | null): string => {
   if (!status) return "等候设备实时状态";
@@ -446,6 +460,26 @@ el("liveForgetDevice").addEventListener("click", () => {
   if (!window.confirm("清除本网站保存的设备记录和验证码，并断开连接？")) return;
   client?.forgetDevice(); statusAt = 0; confirmedReservation = null; diagnostics.add("device-records-forgotten"); render();
 });
+el("rawCaptureToggle").addEventListener("click", () => {
+  if (rawCapture.enabled) rawCapture.stop(); else rawCapture.start();
+  refreshRawCapture(true);
+});
+el("rawCaptureClear").addEventListener("click", () => { rawCapture.clear(); refreshRawCapture(true); });
+el("rawCaptureCopy").addEventListener("click", async () => {
+  const value = rawCapture.toText();
+  if (!value) return;
+  const area = el<HTMLTextAreaElement>("rawCaptureText");
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(value);
+    text("rawCaptureHint", "抓包已复制。");
+  } catch {
+    area.value = value; area.focus(); area.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch { /* 允许手动选择 */ }
+    text("rawCaptureHint", copied ? "抓包已复制。" : "已选中抓包文本，可手动复制。");
+  }
+});
 el("copyDiagnostics").addEventListener("click", async () => {
   const value = diagnostics.exportText(environment());
   const area = el<HTMLTextAreaElement>("diagnosticsText");
@@ -501,6 +535,7 @@ resetReservationStart();
 diagnostics.add("app-start", { ...environment(), schema: 4,
   buildVersion: __BUILD_VERSION__, buildRevision: __BUILD_REVISION__, buildTimeLocal: formatLocalBuildTime(__BUILD_TIME__) });
 refreshDiagnostics(true);
+refreshRawCapture(true);
 render();
 setInterval(render, 5000);
 setInterval(updateReservationCountdown, 1000);
@@ -510,12 +545,13 @@ document.addEventListener("visibilitychange", () => {
   refreshDiagnostics(); updateReservationCountdown();
 });
 window.addEventListener("pagehide", event => {
+  rawCapture.stop(); rawCapture.clear(); refreshRawCapture(true);
   diagnostics.add("page-hide", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
 });
 window.addEventListener("pageshow", event => {
   diagnostics.add("page-show", { persisted: event.persisted, connected: !!client?.currentDevice?.gatt?.connected,
     authorized: !!client?.authorized, statusAgeMs: statusAt ? Date.now() - statusAt : null });
-  refreshDiagnostics(); render();
+  refreshDiagnostics(); refreshRawCapture(true); render();
 });
 // 页面加载与刷新只渲染离线状态；恢复连接必须由用户点击「一键连接上次设备」。

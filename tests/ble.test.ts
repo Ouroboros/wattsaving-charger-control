@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharacteristic, type BleDevice, type BleServer, type ChargerEvent } from "../src/ble";
 import { Diagnostics } from "../src/diagnostics";
+import { RawCapture } from "../src/raw-capture";
 import { experimentalQueryCommand } from "../src/experimental";
 import { nextMidnight } from "../src/protocol";
 
@@ -672,4 +673,33 @@ test("APP 查询手动发送后仅识别匹配回报，分片敏感内容不展�
   client.disconnect();
   await assert.rejects(pending, /结果未知/);
   assert.equal(client.experimentalIdentityReady, false);
+});
+
+test("手动抓包能记录授权前RX原文与TX明文，停止后不再记录，持久诊断仍脱敏", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("private-device-id");
+  const capture = new RawCapture();
+  const log = new Diagnostics(null);
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {}, () => true,
+    (event, data, level) => log.add(event, data, level), (direction, bytes) => { capture.record(direction, bytes); });
+  await client.chooseDevice(2); await tick();
+  assert.equal(capture.count, 0);
+  capture.start();
+  const report = binaryIdentityReport();
+  device.notifier.pushBytes(report.slice(0, 20)); // 分片与授权前的 54 都保留原始通知供排查。
+  device.notifier.pushBytes(report.slice(20));
+  assert.match(capture.toText(), /RX 通知 · 20 字节/);
+  assert.match(capture.toText(), /RX 通知 · 35 字节/);
+  assert.match(capture.toText(), /HEX: 23 37 54 11 22 33 44 05/);
+  await client.login("12345", false); await tick();
+  assert.equal(client.experimentalIdentityReady, false);
+  assert.match(capture.toText(), /ASCII: @%PD-100-0-181-12345-@/);
+  const exported = log.exportText({ secureContext: true, webBluetooth: true, getDevices: false, scheme: "https" });
+  assert.equal(exported.includes("12345"), false);
+  assert.equal(exported.includes("23 37 54 11"), false);
+  capture.stop();
+  const count = capture.count;
+  device.notifier.push(stateFrame("2"));
+  assert.equal(capture.count, count);
+  client.disconnect();
 });

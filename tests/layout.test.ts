@@ -46,6 +46,10 @@ test("五个标签占据容器底行、内容区独立滚动，实验功能独�
   assert.match(about, /id="buildInfo"/);
   assert.doesNotMatch(about, /个人用网页 · 非官方产品|真机控制 · 尚待实机验证/);
   assert.match(html, /id="liveLog" role="log" aria-live="off"/);
+  const feedbackTab = html.slice(html.indexOf('<section id="tabPanelFeedback"'), html.indexOf('<section id="tabPanelAbout"'));
+  for (const id of ["rawCaptureToggle", "rawCaptureClear", "rawCaptureCopy", "rawCaptureText", "rawCaptureState"])
+    assert.match(feedbackTab, new RegExp(`id="${id}"`));
+  assert.ok(feedbackTab.indexOf('id="rawCaptureText"') < feedbackTab.indexOf('id="diagnosticsText"'));
   assert.match(html, /\.log \{[^}]*max-height:240px; overflow-y:auto;/);
 });
 
@@ -61,6 +65,14 @@ test("实验页和发送实现都不再提供档位写入；只保留手动查�
   assert.doesNotMatch(source, /experimentalGear|pendingGear|gear-reply|experimental-ack|0x32|手动实验：功率档位/);
   assert.match(source, /experimentalQueryCommand/);
   assert.match(source, /experimentalIdentityReady/);
+});
+
+test("抓包手动启用并在离开页面时清空，不进入脱敏日志导出", () => {
+  const source = readFileSync("src/main.ts", "utf8");
+  assert.match(source, /rawCapture\.record\(direction, bytes\)/);
+  assert.match(source, /if \(rawCapture\.enabled\) rawCapture\.stop\(\); else rawCapture\.start\(\);/);
+  assert.match(source, /rawCapture\.stop\(\); rawCapture\.clear\(\); refreshRawCapture\(true\);/);
+  assert.doesNotMatch(source, /diagnostics\.add\("rawCapture"/);
 });
 
 test("刷新页面不会自动连接，只允许点击按钮恢复上次设备", () => {

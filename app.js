@@ -427,7 +427,9 @@
   }
   var ChargerClient = class {
     constructor(adapter2, emit, enabled = () => true, diagnose = () => {
+    }, captureRaw = () => {
     }) {
+      this.captureRaw = captureRaw;
       __publicField(this, "adapter");
       __publicField(this, "emit");
       __publicField(this, "enabled");
@@ -1128,6 +1130,10 @@
     }
     onBytes(view) {
       const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+      try {
+        this.captureRaw("RX", bytes);
+      } catch {
+      }
       const experimental = this.experimentalDecoder.feed(bytes);
       const text2 = new DataView(experimental.text.buffer, experimental.text.byteOffset, experimental.text.byteLength);
       const frames = this.decoder.feed(decodeAscii(text2));
@@ -1312,6 +1318,10 @@
       const writer = this.writer;
       if (!writer || !this.server?.connected) throw new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00");
       this.diagnose("tx-attempt", { action, bytes: bytes.length });
+      try {
+        this.captureRaw("TX", bytes);
+      } catch {
+      }
       let method = "none";
       try {
         if (writer.properties.write && writer.writeValueWithResponse) {
@@ -1450,6 +1460,41 @@
     }
   };
 
+  // src/raw-capture.ts
+  var MAX_ENTRIES2 = 200;
+  var RawCapture = class {
+    constructor() {
+      __publicField(this, "entries", []);
+      __publicField(this, "enabled", false);
+    }
+    get count() {
+      return this.entries.length;
+    }
+    start() {
+      this.enabled = true;
+    }
+    stop() {
+      this.enabled = false;
+    }
+    clear() {
+      this.entries = [];
+    }
+    record(direction, bytes, at = /* @__PURE__ */ new Date()) {
+      if (!this.enabled) return false;
+      const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+      const ascii = [...bytes].map((byte) => byte >= 32 && byte <= 126 ? String.fromCharCode(byte) : ".").join("");
+      const label = direction === "TX" ? "TX \u5199\u5165\u5C1D\u8BD5" : "RX \u901A\u77E5";
+      this.entries.push(`[${at.toLocaleString("zh-CN", { hour12: false })}] ${label} \xB7 ${bytes.length} \u5B57\u8282
+HEX: ${hex}
+ASCII: ${ascii}`);
+      if (this.entries.length > MAX_ENTRIES2) this.entries.shift();
+      return true;
+    }
+    toText() {
+      return this.entries.join("\n\n");
+    }
+  };
+
   // src/tabs.ts
   function showTab(pairs, selected) {
     if (selected < 0 || selected >= pairs.length) throw new RangeError("\u672A\u77E5\u6807\u7B7E\u9875");
@@ -1488,9 +1533,10 @@
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "7f3df2c", builtAt: "2026-09-27T19:43:16.901Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "abe7877", builtAt: "2026-09-28T00:46:00.973Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
+  var rawCapture = new RawCapture();
   try {
     window.localStorage.removeItem("wattsaving-local-history-v1");
   } catch {
@@ -1498,6 +1544,8 @@
   var client = adapter ? new ChargerClient(adapter, handleEvent, () => window.isSecureContext, (event, data, level) => {
     diagnostics.add(event, data, level);
     refreshDiagnostics();
+  }, (direction, bytes) => {
+    if (rawCapture.record(direction, bytes)) refreshRawCapture();
   }) : null;
   var phase = "offline";
   var busy = false;
@@ -1564,6 +1612,16 @@
     const area = el("diagnosticsText");
     if (force || document.activeElement !== area) area.value = diagnostics.exportText(environment());
     if (!diagnostics.storageAvailable) text("diagnosticsHint", "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u672C\u5730\u4FDD\u5B58\uFF1B\u5173\u95ED\u9875\u9762\u540E\u65E5\u5FD7\u53EF\u80FD\u4E22\u5931\u3002\u8BF7\u5148\u590D\u5236\u4E0A\u65B9\u6587\u672C\u3002");
+  }
+  function refreshRawCapture(force = false) {
+    const area = el("rawCaptureText");
+    const followLatest = area.scrollHeight - area.scrollTop - area.clientHeight < 24;
+    if (force || document.activeElement !== area) area.value = rawCapture.toText();
+    if (followLatest) area.scrollTop = area.scrollHeight;
+    text("rawCaptureToggle", rawCapture.enabled ? "\u505C\u6B62\u6293\u5305" : "\u5F00\u59CB\u6293\u5305");
+    text("rawCaptureState", `${rawCapture.enabled ? "\u6293\u5305\u4E2D" : "\u5DF2\u505C\u6B62"} \xB7 ${rawCapture.count} \u6761`);
+    el("rawCaptureCopy").disabled = !rawCapture.count;
+    el("rawCaptureClear").disabled = !rawCapture.count;
   }
   var stateName = (status2) => {
     if (!status2) return "\u7B49\u5019\u8BBE\u5907\u5B9E\u65F6\u72B6\u6001";
@@ -2041,6 +2099,35 @@ ${faultAdvice(status2)}
     diagnostics.add("device-records-forgotten");
     render();
   });
+  el("rawCaptureToggle").addEventListener("click", () => {
+    if (rawCapture.enabled) rawCapture.stop();
+    else rawCapture.start();
+    refreshRawCapture(true);
+  });
+  el("rawCaptureClear").addEventListener("click", () => {
+    rawCapture.clear();
+    refreshRawCapture(true);
+  });
+  el("rawCaptureCopy").addEventListener("click", async () => {
+    const value = rawCapture.toText();
+    if (!value) return;
+    const area = el("rawCaptureText");
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(value);
+      text("rawCaptureHint", "\u6293\u5305\u5DF2\u590D\u5236\u3002");
+    } catch {
+      area.value = value;
+      area.focus();
+      area.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+      }
+      text("rawCaptureHint", copied ? "\u6293\u5305\u5DF2\u590D\u5236\u3002" : "\u5DF2\u9009\u4E2D\u6293\u5305\u6587\u672C\uFF0C\u53EF\u624B\u52A8\u590D\u5236\u3002");
+    }
+  });
   el("copyDiagnostics").addEventListener("click", async () => {
     const value = diagnostics.exportText(environment());
     const area = el("diagnosticsText");
@@ -2106,10 +2193,11 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "7f3df2c",
-    buildTimeLocal: formatLocalBuildTime("2026-09-27T19:43:16.901Z")
+    buildRevision: "abe7877",
+    buildTimeLocal: formatLocalBuildTime("2026-09-28T00:46:00.973Z")
   });
   refreshDiagnostics(true);
+  refreshRawCapture(true);
   render();
   setInterval(render, 5e3);
   setInterval(updateReservationCountdown, 1e3);
@@ -2124,6 +2212,9 @@ ${faultAdvice(status2)}
     updateReservationCountdown();
   });
   window.addEventListener("pagehide", (event) => {
+    rawCapture.stop();
+    rawCapture.clear();
+    refreshRawCapture(true);
     diagnostics.add("page-hide", {
       persisted: event.persisted,
       connected: !!client?.currentDevice?.gatt?.connected,
@@ -2139,6 +2230,7 @@ ${faultAdvice(status2)}
       statusAgeMs: statusAt ? Date.now() - statusAt : null
     });
     refreshDiagnostics();
+    refreshRawCapture(true);
     render();
   });
 })();

@@ -149,7 +149,8 @@ export class ChargerClient {
     adapter: BleAdapter,
     emit: (event: ChargerEvent) => void,
     enabled: () => boolean = () => true,
-    diagnose: (event: string, data?: Record<string, DiagnosticValue>, level?: DiagnosticLevel) => void = () => {}
+    diagnose: (event: string, data?: Record<string, DiagnosticValue>, level?: DiagnosticLevel) => void = () => {},
+    private readonly captureRaw: (direction: "TX" | "RX", bytes: Uint8Array) => void = () => {}
   ) { this.adapter = adapter; this.emit = emit; this.enabled = enabled; this.diagnose = diagnose; }
   get currentDevice(): BleDevice | null { return this.device; }
   get currentProtocol(): Version | null { return this.protocol; }
@@ -611,6 +612,7 @@ export class ChargerClient {
   }
   private onBytes(view: DataView): void {
     const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    try { this.captureRaw("RX", bytes); } catch { /* 抓包显示失败不影响通知解析 */ }
     const experimental = this.experimentalDecoder.feed(bytes);
     const text = new DataView(experimental.text.buffer, experimental.text.byteOffset, experimental.text.byteLength);
     const frames = this.decoder.feed(decodeAscii(text));
@@ -744,6 +746,7 @@ export class ChargerClient {
     const writer = this.writer;
     if (!writer || !this.server?.connected) throw new Error("蓝牙连接已断开");
     this.diagnose("tx-attempt", { action, bytes: bytes.length });
+    try { this.captureRaw("TX", bytes); } catch { /* 抓包显示失败不影响蓝牙写入 */ }
     let method = "none";
     try {
       if (writer.properties.write && writer.writeValueWithResponse) { method = "with-response"; await writer.writeValueWithResponse(bytes); }
