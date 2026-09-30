@@ -4,7 +4,7 @@ import { ChargerClient, reservationBlockReason, type BleAdapter, type BleCharact
 import { Diagnostics } from "../src/diagnostics";
 import { RawCapture } from "../src/raw-capture";
 import { experimentalQueryCommand } from "../src/experimental";
-import { nextMidnight } from "../src/protocol";
+import { adminCommand, checksum, nextMidnight } from "../src/protocol";
 
 class MemoryStorage {
   private values = new Map<string,string>();
@@ -34,6 +34,8 @@ class FakeWriter extends EventTarget {
   readonly properties = { write: true };
   readonly sent: string[] = [];
   authAccept = true;
+  adminAuthAccept = true;
+  adminAuthAck = true;
   reservationAccept = true;
   reservationCancelAccept = true;
   reservationCancelStatus = true;
@@ -57,7 +59,8 @@ class FakeWriter extends EventTarget {
     });
     const adminReplies: Record<string, string> = { "120": "121", "110": "111", "112": "113", "202": "203", "136": "137", "118": "119", "132": "133" };
     const adminCode = /^@%PD-(\d{3})-/.exec(frame)?.[1];
-    if (adminCode && adminReplies[adminCode]) queueMicrotask(() => this.notifier.push(`@%DP-${adminReplies[adminCode]}-0-181-1-@`));
+    if (adminCode && adminReplies[adminCode] && (adminCode !== "120" || this.adminAuthAck))
+      queueMicrotask(() => this.notifier.push(`@%DP-${adminReplies[adminCode]}-0-181-${adminCode === "120" && !this.adminAuthAccept ? "0" : "1"}-@`));
   }
 }
 class FakeDevice extends EventTarget implements BleDevice {
@@ -102,6 +105,283 @@ test("首次成功授权后按设备保存密码，恢复连接时自动发送�
   assert.equal(device.writer.sent.filter(frame => frame.includes("12345")).length, 2);
   restored.disconnect();
 });
+const savedCredentials = (id: string): { password?: string; adminPassword?: string } =>
+  JSON.parse(localStorage.getItem("wattsaving-ble-devices-v1") ?? '{"devices":{}}').devices[id] ?? {};
+
+// 以下是离线模拟通知与写入，不代表真实设备验证。
+test("管理员密码仅在匹配成功回执后保存；重连先蓝牙再管理员授权，每次连接只发一次", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("synthetic-credential-device");
+  const adapter: BleAdapter = { requestDevice: async () => device, getDevices: async () => [device] };
+  const log = new Diagnostics(null);
+  const client = new ChargerClient(adapter, () => {}, () => true, (event, data, level) => log.add(event, data, level));
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  device.writer.adminAuthAck = false;
+  const manual = client.admin("admin-auth", "54321", true);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  device.notifier.push("@%DP-111-0-181-1-@");
+  assert.equal(client.administratorAuthorized, false);
+  device.notifier.push("@%DP-121-0-181-1-@"); await manual;
+  assert.equal(savedCredentials(device.id).adminPassword, "54321");
+  client.disconnect();
+  assert.equal(client.administratorAuthorized, false);
+  const events: ChargerEvent[] = [];
+  const restored = new ChargerClient(adapter, event => events.push(event), () => true, (event, data, level) => log.add(event, data, level));
+  assert.equal(device.writer.sent.length, 3); // 构造新页面实例不会连接或发送。
+  await restored.restore(); await tick();
+  assert.equal(restored.authorized, true);
+  assert.equal(restored.automaticAdministratorLoginPending, true);
+  assert.equal(restored.administratorAuthorized, false);
+  assert.equal(savedCredentials(device.id).adminPassword, "54321"); // 蓝牙登录不能覆盖管理员缓存。
+  assert.throws(() => restored.control("start"));
+  await assert.rejects(restored.refresh(), /等待设备操作回执/);
+  device.notifier.push("@%DP-121-0-181-1-@"); await tick();
+  assert.equal(restored.administratorAuthorized, true);
+  assert.equal(restored.automaticAdministratorLoginPending, false);
+  for (let i = 0; i < 4; i++) device.notifier.push(stateFrame("2"));
+  assert.equal(device.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 2);
+  assert.deepEqual(device.writer.sent.slice(3).map(frame => frame.split("-")[1]), ["100", "120", "204"]);
+  assert.ok(events.some(event => event.type === "admin-auth-state"));
+  const exported = log.exportText({ secureContext: true, webBluetooth: true, getDevices: true, scheme: "https" });
+  for (const secret of ["12345", "54321", device.id, "@%PD-120"]) assert.equal(exported.includes(secret), false, secret);
+  restored.disconnect();
+});
+
+test("管理员缓存不会跨设备复用；手动蓝牙授权且不保存蓝牙密码仍能自动验证管理员", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const first = new FakeDevice("admin-A"), other = new FakeDevice("admin-B");
+  const client = new ChargerClient({ requestDevice: async () => first }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  const otherClient = new ChargerClient({ requestDevice: async () => other }, () => {});
+  await otherClient.chooseDevice(2); await otherClient.login("12345", true); await tick();
+  assert.equal(other.writer.sent.some(frame => frame.startsWith("@%PD-120")), false);
+  assert.equal(savedCredentials(first.id).adminPassword, "54321");
+  otherClient.disconnect();
+  client.setManualBluetoothLogin(true);
+  await client.chooseDevice(2); await tick();
+  assert.equal(first.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 1);
+  await client.login("12345", false); await tick();
+  assert.equal(client.administratorAuthorized, true);
+  assert.equal(savedCredentials(first.id).password, undefined);
+  assert.equal(savedCredentials(first.id).adminPassword, "54321");
+  client.disconnect();
+});
+
+test("不勾选记住管理员密码会删除旧缓存，下一次连接不自动发送管理员验证码", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-opt-out");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321");
+  await client.admin("admin-auth", "56789", false);
+  assert.equal(client.administratorAuthorized, true);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  client.disconnect(); await client.restore(); await tick();
+  assert.equal(device.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 2);
+  assert.equal(client.administratorAuthorized, false);
+  client.disconnect();
+});
+
+test("拒绝管理员密码不缓存，自动验证被拒绝后仅清除管理员缓存，不重试也不撤销蓝牙授权", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-reject");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  device.writer.adminAuthAccept = false;
+  await assert.rejects(client.admin("admin-auth", "54321"), /拒绝管理员/);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  device.writer.adminAuthAccept = true;
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  device.writer.adminAuthAccept = false;
+  await client.restore(); await tick();
+  assert.equal(client.authorized, true);
+  assert.equal(client.administratorAuthorized, false);
+  assert.equal(client.automaticAdministratorLoginPending, false);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  assert.equal(savedCredentials(device.id).password, "12345");
+  const writes = device.writer.sent.length;
+  for (let i = 0; i < 4; i++) device.notifier.push(stateFrame("2"));
+  assert.equal(device.writer.sent.length, writes);
+  client.disconnect(); await client.restore(); await tick();
+  assert.equal(device.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 3);
+  client.disconnect();
+});
+
+test("自动管理员授权超时不重试；保留此前验证成功的密码，不授予管理权限", async t => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-timeout");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  device.writer.adminAuthAck = false;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await client.restore();
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(client.automaticAdministratorLoginPending, true);
+  t.mock.timers.tick(10000);
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(client.authorized, true);
+  assert.equal(client.administratorAuthorized, false);
+  assert.equal(client.automaticAdministratorLoginPending, false);
+  assert.equal(savedCredentials(device.id).adminPassword, "54321");
+  const count = device.writer.sent.length;
+  device.notifier.push(stateFrame("2"));
+  t.mock.timers.tick(30000);
+  assert.equal(device.writer.sent.length, count);
+  client.disconnect();
+});
+
+test("管理员自动写入失败不重试，不影响已取得的蓝牙授权", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-write-error");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  const write = device.writer.writeValueWithResponse.bind(device.writer);
+  let errors = 0;
+  device.writer.writeValueWithResponse = async bytes => {
+    const view = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (String.fromCharCode(...view).startsWith("@%PD-120")) {
+      errors++; throw new Error("synthetic write failure");
+    }
+    await write(bytes);
+  };
+  await client.restore(); await tick();
+  assert.equal(errors, 1);
+  assert.equal(client.authorized, true);
+  assert.equal(client.administratorAuthorized, false);
+  assert.equal(client.automaticAdministratorLoginPending, false);
+  device.notifier.push(stateFrame("2")); await tick();
+  assert.equal(errors, 1);
+  client.disconnect();
+});
+
+test("删除密码时阻止待处理管理员回执重新保存；清除设备记录删除两类密码", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-forget");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  device.writer.adminAuthAck = false;
+  await client.restore(); await tick();
+  client.forgetPassword(); client.forgetAdminPassword();
+  device.notifier.push("@%DP-121-0-181-1-@"); await tick();
+  assert.equal(savedCredentials(device.id).password, undefined);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  client.disconnect(); await client.restore(); await tick();
+  assert.equal(device.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 2);
+  await client.login("12345", true); await tick();
+  device.writer.adminAuthAck = true;
+  await client.admin("admin-auth", "54321");
+  client.forgetDevice();
+  assert.deepEqual(JSON.parse(localStorage.getItem("wattsaving-ble-devices-v1")!), { lastId: "", devices: {} });
+});
+
+test("修改蓝牙验证码只删蓝牙缓存；修改管理员验证码撤销权限并清除旧管理员缓存", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-change");
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321");
+  await client.admin("bluetooth-password", "56789");
+  assert.equal(savedCredentials(device.id).password, undefined);
+  assert.equal(savedCredentials(device.id).adminPassword, "54321");
+  await client.admin("admin-password", "23456");
+  assert.equal(client.administratorAuthorized, false);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
+  client.disconnect(); await client.restore(); await tick();
+  await client.login("56789", true); await tick();
+  assert.equal(device.writer.sent.filter(frame => frame.startsWith("@%PD-120")).length, 1);
+  client.disconnect();
+});
+
+test("自动管理员授权期间断线，旧连接回执和异步回调不会污染新设备", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const first = new FakeDevice("admin-old"), other = new FakeDevice("admin-new");
+  let selected = first;
+  const client = new ChargerClient({ requestDevice: async () => selected }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  first.writer.adminAuthAck = false;
+  await client.restore(); await tick();
+  assert.equal(client.automaticAdministratorLoginPending, true);
+  selected = other;
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  first.notifier.push("@%DP-121-0-181-1-@"); await tick();
+  assert.equal(client.authorized, true);
+  assert.equal(client.administratorAuthorized, false);
+  assert.equal(client.automaticAdministratorLoginPending, false);
+  assert.equal(savedCredentials(other.id).adminPassword, undefined);
+  assert.equal(savedCredentials(first.id).adminPassword, "54321");
+  assert.equal(other.writer.sent.some(frame => frame.startsWith("@%PD-120")), false);
+  client.disconnect();
+});
+
+test("旧连接迟到的管理员写入失败不能拒绝新连接的验证", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const first = new FakeDevice("admin-late-write"), other = new FakeDevice("admin-current-write");
+  let selected = first;
+  const client = new ChargerClient({ requestDevice: async () => selected }, () => {});
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  const write = first.writer.writeValueWithResponse.bind(first.writer);
+  let failOldWrite!: (error: Error) => void;
+  first.writer.writeValueWithResponse = data => {
+    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    if (String.fromCharCode(...bytes).startsWith("@%PD-120")) return new Promise<void>((_, reject) => { failOldWrite = reject; });
+    return write(data);
+  };
+  await client.restore(); await tick();
+  assert.equal(client.automaticAdministratorLoginPending, true);
+  selected = other;
+  await client.chooseDevice(2); await client.login("12345", true); await tick();
+  other.writer.adminAuthAck = false;
+  const current = client.admin("admin-auth", "23456");
+  failOldWrite(new Error("synthetic late write failure")); await tick();
+  assert.equal(client.adminPending, true);
+  other.notifier.push("@%DP-121-0-181-1-@"); await current;
+  assert.equal(client.administratorAuthorized, true);
+  assert.equal(savedCredentials(other.id).adminPassword, "23456");
+  client.disconnect();
+});
+
+test("旧协议也能记住管理员密码并重连自动发送，仍等待双帧校验回执", async () => {
+  (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
+  const device = new FakeDevice("admin-legacy");
+  const reply = (admin: boolean): string => {
+    const body = [..."0".repeat(19)];
+    body[0] = body[1] = "8"; body[18] = admin ? "6" : "1";
+    if (admin) body[3] = "4";
+    body[admin ? 7 : 4] = "3";
+    const part = body.join("") + checksum(body.join(""));
+    return part + part;
+  };
+  device.notifier.startNotifications = async () => device.notifier;
+  device.writer.writeValueWithResponse = async data => {
+    const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    const text = String.fromCharCode(...bytes);
+    device.writer.sent.push(text);
+    if (text.startsWith("80100")) queueMicrotask(() => device.notifier.push(reply(false)));
+    if (text.startsWith("80101") && device.writer.adminAuthAck) queueMicrotask(() => device.notifier.push(reply(true)));
+  };
+  const client = new ChargerClient({ requestDevice: async () => device }, () => {});
+  await client.chooseDevice(1); await client.login("12345", true); await tick();
+  await client.admin("admin-auth", "54321"); client.disconnect();
+  device.writer.adminAuthAck = false;
+  await client.chooseDevice(1); await tick();
+  assert.equal(client.automaticAdministratorLoginPending, true);
+  assert.equal(client.administratorAuthorized, false);
+  const valid = reply(true);
+  device.notifier.push(valid.slice(0, -1) + String((Number(valid.at(-1)) + 1) % 10));
+  assert.equal(client.administratorAuthorized, false);
+  device.notifier.push(valid); await tick();
+  assert.equal(client.administratorAuthorized, true);
+  assert.equal(savedCredentials(device.id).adminPassword, "54321");
+  assert.equal(device.writer.sent.filter(frame => frame === adminCommand(1, "admin-auth", "54321")).length, 2);
+  client.disconnect();
+});
+
 test("独立管理员验证后才能执行设置，修改管理员密码立即撤销管理权限", async () => {
   (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = new MemoryStorage();
   const device = new FakeDevice("admin-test-device");
@@ -128,6 +408,7 @@ test("独立管理员验证后才能执行设置，修改管理员密码立即�
   assert.equal(client.currentStatus?.mode, "2"); // 回执与订阅不能证明设备已进入无感充电模式。
   await client.admin("admin-password", "12345");
   assert.equal(client.administratorAuthorized, false);
+  assert.equal(savedCredentials(device.id).adminPassword, undefined);
   assert.throws(() => client.admin("pair"), /管理员验证码/);
   client.disconnect();
 });

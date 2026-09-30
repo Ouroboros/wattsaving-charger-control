@@ -171,6 +171,10 @@ function handleEvent(event: ChargerEvent): void {
     diagnostics.add("phase", { phase }); record(event.message);
   }
   if (event.type === "notice") { record(event.message); if (event.severity === "error") showErrorModal(event.message); }
+  if (event.type === "admin-auth-state") {
+    adminMessage = event.message; record(event.message);
+    if (event.severity === "error") showErrorModal(event.message);
+  }
   if (event.type === "reservation") { reservationResult = event.message; record(event.message); }
   if (event.type === "protocol") record(`协议：${event.version === 1 ? "旧版" : "新版"}（${event.source}）`);
   if (event.type === "auth-needed") record(event.message);
@@ -224,16 +228,16 @@ function render(): void {
   text("experimentIdentityStatus", client?.experimentalIdentityReady ?
     "已从当前设备 54 通知取得查询字段。" : "等待当前设备 54 通知。");
   for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
-    el<HTMLButtonElement>(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
+    el<HTMLButtonElement>(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending || !!client.adminPending;
   const loginProgress = el("liveLoginProgress");
   loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
   if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "正在自动登录，等待设备确认…" : "正在验证验证码，等待设备确认…");
   el("liveAuthBox").hidden = !device || phase !== "password" || !!client?.authorized;
   el<HTMLButtonElement>("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
-  el<HTMLButtonElement>("liveStart").disabled = !client?.authorized || !fresh || busy;
-  el<HTMLButtonElement>("liveStop").disabled = !client?.authorized || !fresh || busy || status?.state !== "4";
-  el<HTMLButtonElement>("liveUnlock").disabled = !client?.authorized || !fresh || busy || !status || status.state === "4" || status.mode === "3" || status.lock === "0";
-  el<HTMLButtonElement>("liveRefresh").disabled = !client?.authorized || busy;
+  el<HTMLButtonElement>("liveStart").disabled = !client?.authorized || !fresh || busy || !!client.adminPending;
+  el<HTMLButtonElement>("liveStop").disabled = !client?.authorized || !fresh || busy || !!client.adminPending || status?.state !== "4";
+  el<HTMLButtonElement>("liveUnlock").disabled = !client?.authorized || !fresh || busy || !!client.adminPending || !status || status.state === "4" || status.mode === "3" || status.lock === "0";
+  el<HTMLButtonElement>("liveRefresh").disabled = !client?.authorized || busy || !!client.adminPending;
   el<HTMLButtonElement>("liveDisconnect").disabled = !device;
   el<HTMLButtonElement>("liveChoose").disabled = !supported || busy;
   el<HTMLButtonElement>("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
@@ -241,7 +245,7 @@ function render(): void {
   const adminPanel = el("adminPanel");
   adminPanel.hidden = !client?.authorized;
   const adminReady = !!client?.administratorAuthorized;
-  el("adminAuthBox").hidden = adminReady;
+  el("adminAuthBox").hidden = adminReady || !!client?.automaticAdministratorLoginPending;
   el("adminControls").hidden = !adminReady;
   el<HTMLButtonElement>("adminLogin").disabled = !client?.authorized || !!client.adminPending || busy;
   for (const id of ["adminPlugOn", "adminPlugOff", "adminChangeBluetoothPassword", "adminChangePassword"])
@@ -257,9 +261,9 @@ function render(): void {
   if (document.activeElement !== authMode) authMode.value = client?.manualBluetoothLogin ? "manual" : "auto";
   text("adminState", adminMessage || (adminReady ? "管理员已验证；管理操作仍需设备回执。" : "管理员权限未验证。"));
   const reservationBlocked = status ? reservationBlockReason(status) : null;
-  el<HTMLButtonElement>("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
+  el<HTMLButtonElement>("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || !!client?.adminPending;
   text("reserveSubmit", client?.canCancelReservation ? "修改预约" : "提交预约");
-  el<HTMLButtonElement>("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status?.state === "4" || !client?.canCancelReservation;
+  el<HTMLButtonElement>("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || !!client?.adminPending || status?.state === "4" || !client?.canCancelReservation;
   const reserveInput = el<HTMLInputElement>("reserveStart");
   if (reservationStartAutomatic && reserveInput.value !== localMinute(nextMidnight())) resetReservationStart();
   reserveInput.min = localMinute(new Date());
@@ -423,10 +427,10 @@ async function runAdmin(action: AdminAction, inputId?: string): Promise<void> {
   if (input) input.value = "";
   busy = true; adminMessage = `正在${label}，等待设备回执…`; render();
   try {
-    await client.admin(action, value);
+    await client.admin(action, value, el<HTMLInputElement>("rememberAdminPassword").checked);
     adminMessage = action === "pair" ? "设备已确认开启配对窗口；请在 iOS 系统完成配对并现场核对是否进入无感模式。" :
       action === "bluetooth-password" ? "设备已确认修改；旧验证码缓存已删除，重新连接时须输入新验证码并由设备验证。" :
-      action === "admin-password" ? "设备已确认修改；原管理员权限已失效，请用新验证码重新验证。" :
+      action === "admin-password" ? "设备已确认修改；旧管理员验证码缓存已删除，请用新验证码重新验证。" :
       action === "mute-on" || action === "mute-off" ? "设备已接受静音操作；状态报文不含静音标志，请现场核对。" :
       action === "admin-auth" ? "设备已确认管理员权限。" : `设备已接受${label}；请等后续设备状态核对。`;
     record(adminMessage);
@@ -453,8 +457,8 @@ el("reserveSubmit").addEventListener("click", () => void reserve("submit"));
 el("reserveCancel").addEventListener("click", () => void reserve("cancel"));
 el("liveDisconnect").addEventListener("click", () => { client?.disconnect(); statusAt = 0; render(); });
 el("liveForgetPassword").addEventListener("click", () => {
-  if (!window.confirm("删除本网站保存的蓝牙验证码？下次需重新输入。")) return;
-  client?.forgetPassword(); diagnostics.add("password-forgotten"); record("已删除保存的验证码。"); render();
+  if (!window.confirm("删除本网站保存的蓝牙和管理员验证码？下次需重新输入。")) return;
+  client?.forgetPassword(); client?.forgetAdminPassword(); diagnostics.add("password-forgotten"); record("已删除保存的两类验证码。"); render();
 });
 el("liveForgetDevice").addEventListener("click", () => {
   if (!window.confirm("清除本网站保存的设备记录和验证码，并断开连接？")) return;

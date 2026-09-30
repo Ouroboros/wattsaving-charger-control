@@ -75,6 +75,16 @@ test("抓包手动启用并在离开页面时清空，不进入脱敏日志导�
   assert.doesNotMatch(source, /diagnostics\.add\("rawCapture"/);
 });
 
+test("管理员密码默认记住，删除验证码同时清除两类缓存，自动验证时隐藏输入框", () => {
+  const html = readFileSync("index.html", "utf8");
+  const source = readFileSync("src/main.ts", "utf8");
+  assert.match(html, /id="rememberAdminPassword" type="checkbox" checked/);
+  assert.doesNotMatch(html, /管理员验证码不保存在网页/);
+  assert.match(source, /client\.admin\(action, value, el<HTMLInputElement>\("rememberAdminPassword"\)\.checked\)/);
+  assert.match(source, /client\?\.forgetPassword\(\); client\?\.forgetAdminPassword\(\)/);
+  assert.match(source, /el\("adminAuthBox"\)\.hidden = adminReady \|\| !!client\?\.automaticAdministratorLoginPending/);
+});
+
 test("刷新页面不会自动连接，只允许点击按钮恢复上次设备", () => {
   const source = readFileSync("src/main.ts", "utf8");
   const html = readFileSync("index.html", "utf8");

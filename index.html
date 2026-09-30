@@ -58,8 +58,10 @@
         <p class="footer">密码不会写入 GitHub 或云端；网站本地存储不是 iOS 钥匙串。清除网站数据会删除它。</p><button id="liveAuthorize" type="button" class="primary full">发送验证码并等待设备确认</button>
       </div>
       <div class="panel"><h2>连接与本地数据</h2><div class="actions"><button class="secondary" id="liveForgetPassword" type="button">删除保存的验证码</button><button class="danger" id="liveForgetDevice" type="button">清除设备记录</button></div></div>
-      <div class="panel" id="adminPanel" hidden><h2>权限管理</h2><p class="sub">需独立管理员验证码并获得设备回执；不是蓝牙连接验证码。管理员验证码不保存在网页。</p>
-        <div id="adminAuthBox"><label for="adminPassword">五位管理员验证码</label><input id="adminPassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off"><button id="adminLogin" class="primary full" type="button">管理员认证</button></div>
+      <div class="panel" id="adminPanel" hidden><h2>权限管理</h2><p class="sub">需独立管理员验证码；每次连接仍须设备确认。</p>
+        <div id="adminAuthBox"><label for="adminPassword">五位管理员验证码</label><input id="adminPassword" type="password" inputmode="numeric" maxlength="5" autocomplete="off">
+          <label class="check"><input id="rememberAdminPassword" type="checkbox" checked>验证成功后记住，下次连接自动授权</label>
+          <button id="adminLogin" class="primary full" type="button">管理员认证</button></div>
         <div id="adminControls" hidden>
           <div class="actions"><button id="adminPlugOn" class="secondary" type="button">设置即插即充</button><button id="adminPlugOff" class="secondary" type="button">取消即插即充</button><button id="adminMuteOn" class="secondary" type="button">设置静音</button><button id="adminMuteOff" class="secondary" type="button">取消静音</button></div>
           <button id="adminPair" class="secondary full" type="button">开启无感充电配对窗口</button><p class="footer" id="adminPairHint">仅新版协议有静音和无感配对指令；设备回执不等于手机已完成系统蓝牙配对。</p>
@@ -126,6 +128,6 @@
       <button class="tab" id="tabAbout" role="tab" aria-controls="tabPanelAbout" aria-selected="false" tabindex="-1" type="button">关于</button>
     </div>
   </section></main>
-  <script defer src="./app.js?v=raw-capture-v6"></script>
+  <script defer src="./app.js?v=remember-admin-v7"></script>
 </body>
 </html>

@@ -454,6 +454,8 @@
       __publicField(this, "sniffTimer", null);
       __publicField(this, "autoLoginTried", false);
       __publicField(this, "autoLoginInProgress", false);
+      __publicField(this, "autoAdminLoginTried", false);
+      __publicField(this, "autoAdminLoginInProgress", false);
       __publicField(this, "protocol", null);
       __publicField(this, "phase", "offline");
       __publicField(this, "connectionStage", "offline");
@@ -528,6 +530,9 @@
     }
     get automaticLoginPending() {
       return this.autoLoginInProgress && this.phase === "authenticating";
+    }
+    get automaticAdministratorLoginPending() {
+      return this.autoAdminLoginInProgress;
     }
     get reservationPending() {
       return !!this.pendingReservation;
@@ -622,10 +627,20 @@
       this.diagnose("device-remembered", { known: !!previous, persisted });
     }
     forgetPassword() {
+      if (this.pendingAuth) this.pendingAuth.remember = false;
       const id = this.device?.id ?? this.loadVault().lastId;
       const vault = this.loadVault();
       if (vault.devices[id]) {
         delete vault.devices[id].password;
+        this.storeVault(vault);
+      }
+    }
+    forgetAdminPassword() {
+      if (this.pendingAdmin?.action === "admin-auth") this.pendingAdmin.remember = false;
+      const id = this.device?.id ?? this.loadVault().lastId;
+      const vault = this.loadVault();
+      if (vault.devices[id]) {
+        delete vault.devices[id].adminPassword;
         this.storeVault(vault);
       }
     }
@@ -638,7 +653,7 @@
         localStorage.removeItem(AUTH_MODE_KEY);
       } catch {
       }
-      this.emit({ type: "notice", message: "\u5DF2\u6E05\u9664\u8BE5\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u84DD\u7259\u9A8C\u8BC1\u7801\u3002" });
+      this.emit({ type: "notice", message: "\u5DF2\u6E05\u9664\u8BE5\u7F51\u7AD9\u4FDD\u5B58\u7684\u8BBE\u5907\u548C\u4E24\u7C7B\u9A8C\u8BC1\u7801\u3002" });
     }
     setPhase(phase2, message2) {
       this.phase = phase2;
@@ -1048,7 +1063,30 @@
         void this.write(frame, action).catch((error) => this.rejectControl(new Error(`\u53D1\u9001\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
       });
     }
-    admin(action, password) {
+    async autoAuthorizeAdministrator() {
+      if (!this.authorized || !this.device || this.autoAdminLoginTried || this.adminVerified) return;
+      const saved = this.loadVault().devices[this.device.id]?.adminPassword;
+      if (!saved || !/^\d{5}$/.test(saved)) return;
+      const epoch = this.epoch;
+      this.autoAdminLoginTried = true;
+      this.autoAdminLoginInProgress = true;
+      this.diagnose("admin-cached-start");
+      try {
+        const reply = this.admin("admin-auth", saved, true);
+        this.emit({ type: "admin-auth-state", message: "\u6B63\u5728\u81EA\u52A8\u9A8C\u8BC1\u7BA1\u7406\u5458\uFF0C\u7B49\u5F85\u8BBE\u5907\u56DE\u6267\u2026" });
+        await reply;
+        if (epoch !== this.epoch) return;
+        this.autoAdminLoginInProgress = false;
+        this.diagnose("admin-cached-confirmed");
+        this.emit({ type: "admin-auth-state", message: "\u7BA1\u7406\u5458\u81EA\u52A8\u6388\u6743\u5DF2\u901A\u8FC7\u3002" });
+      } catch (error) {
+        if (epoch !== this.epoch) return;
+        this.autoAdminLoginInProgress = false;
+        this.diagnose("admin-cached-failed", diagnosticError(error), "warn");
+        this.emit({ type: "admin-auth-state", message: "\u7BA1\u7406\u5458\u81EA\u52A8\u6388\u6743\u672A\u901A\u8FC7\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\u3002", severity: "error" });
+      }
+    }
+    admin(action, password, remember = true) {
       if (!this.authorized || !this.protocol || !this.device) throw new Error("\u8BF7\u5148\u8FDE\u63A5\u5E76\u901A\u8FC7\u8BBE\u5907\u84DD\u7259\u6388\u6743");
       if (action !== "admin-auth" && !this.adminVerified) throw new Error("\u8BF7\u5148\u4F7F\u7528\u72EC\u7ACB\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\u53D6\u5F97\u8BBE\u5907\u786E\u8BA4");
       if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("\u4E0A\u4E00\u6761\u8BBE\u5907\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4");
@@ -1058,11 +1096,14 @@
       if (action === "pair" && (status2?.mode === "3" || status2?.selfStartFlag === "2")) throw new Error("\u8BF7\u5148\u53D6\u6D88\u9884\u7EA6\u6216\u5373\u63D2\u5373\u5145\u6A21\u5F0F");
       if (action === "pair" && !this.pairingNotifier) throw new Error("\u672A\u53D1\u73B0\u539F\u5C0F\u7A0B\u5E8F\u914D\u5BF9\u6240\u9700\u7684 FF03 \u901A\u77E5\u7279\u5F81\uFF1B\u4E0D\u80FD\u542F\u52A8\u65E0\u611F\u914D\u5BF9");
       const frame = adminCommand(this.protocol, action, password);
-      this.diagnose("admin-request", { action, version: this.protocol });
+      if (action === "admin-auth") this.autoAdminLoginTried = true;
+      this.diagnose("admin-request", { action, version: this.protocol, remember: action === "admin-auth" && remember });
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => this.rejectAdmin(new Error("\u8BBE\u5907\u7BA1\u7406\u56DE\u6267\u8D85\u65F6\uFF0C\u7ED3\u679C\u672A\u77E5\uFF0C\u8BF7\u6838\u5BF9\u72B6\u6001\u540E\u518D\u64CD\u4F5C"), "timeout"), 1e4);
-        this.pendingAdmin = { action, resolve, reject, timer };
-        void this.write(frame, action).catch((error) => this.rejectAdmin(new Error(`\u53D1\u9001\u7BA1\u7406\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error"));
+        const pending = this.pendingAdmin = { action, resolve, reject, timer, remember, ...action === "admin-auth" ? { password } : {} };
+        void this.write(frame, action).catch((error) => {
+          if (this.pendingAdmin === pending) this.rejectAdmin(new Error(`\u53D1\u9001\u7BA1\u7406\u6307\u4EE4\u5931\u8D25\uFF1A${message(error)}`), "write-error");
+        });
       });
     }
     rejectAdmin(error, reason = "unknown") {
@@ -1204,12 +1245,22 @@
         const vault = this.loadVault();
         const device = this.device;
         vault.lastId = device.id;
-        vault.devices[device.id] = { name: device.name || "\u672A\u547D\u540D\u8BBE\u5907", protocol: this.protocol, ...pending.remember ? { password: pending.password } : {} };
+        vault.devices[device.id] = {
+          ...vault.devices[device.id],
+          name: device.name || "\u672A\u547D\u540D\u8BBE\u5907",
+          protocol: this.protocol,
+          ...pending.remember ? { password: pending.password } : {}
+        };
+        if (!pending.remember) delete vault.devices[device.id].password;
         const persisted = this.storeVault(vault);
         this.diagnose("auth-saved", { remembered: pending.remember, persisted, version: this.protocol });
         this.setPhase("ready", "\u8BBE\u5907\u786E\u8BA4\u6388\u6743\u6210\u529F\uFF1B\u53EF\u4EE5\u8BFB\u53D6\u72B6\u6001\u5E76\u63A7\u5236\u3002");
         pending.resolve();
-        void this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}`, severity: "error" }));
+        const epoch = this.epoch;
+        void this.autoAuthorizeAdministrator().then(() => {
+          if (epoch !== this.epoch || !this.authorized) return;
+          return this.refresh().catch((error) => this.emit({ type: "notice", message: `\u540C\u6B65\u65F6\u949F/\u83B7\u53D6\u72B6\u6001\u5931\u8D25\uFF1A${message(error)}`, severity: "error" }));
+        });
         return;
       }
       if (frame.type === "admin") {
@@ -1231,11 +1282,25 @@
         this.pendingAdmin = null;
         clearTimeout(pending.timer);
         if (!frame.ok) {
+          if (pending.action === "admin-auth") this.forgetAdminPassword();
           pending.reject(new Error("\u8BBE\u5907\u62D2\u7EDD\u7BA1\u7406\u5458\u9A8C\u8BC1\u6216\u8BBE\u7F6E"));
           return;
         }
-        if (pending.action === "admin-auth") this.adminVerified = true;
-        if (pending.action === "admin-password") this.adminVerified = false;
+        if (pending.action === "admin-auth") {
+          this.adminVerified = true;
+          const vault = this.loadVault();
+          const saved = vault.devices[this.device.id];
+          if (saved) {
+            if (pending.remember && pending.password) saved.adminPassword = pending.password;
+            else delete saved.adminPassword;
+            const persisted = this.storeVault(vault);
+            this.diagnose("admin-auth-saved", { remembered: pending.remember, persisted });
+          }
+        }
+        if (pending.action === "admin-password") {
+          this.adminVerified = false;
+          this.forgetAdminPassword();
+        }
         if (pending.action === "bluetooth-password") this.forgetPassword();
         pending.resolve();
         return;
@@ -1354,6 +1419,8 @@
       };
       this.epoch++;
       this.autoLoginInProgress = false;
+      this.autoAdminLoginTried = false;
+      this.autoAdminLoginInProgress = false;
       if (this.sniffTimer) clearTimeout(this.sniffTimer);
       this.sniffTimer = null;
       this.rejectAuth(new Error("\u84DD\u7259\u8FDE\u63A5\u5DF2\u65AD\u5F00"), "disconnect");
@@ -1533,7 +1600,7 @@ ASCII: ${ascii}`);
   var text = (id, value) => {
     el(id).textContent = value;
   };
-  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "abe7877", builtAt: "2026-09-28T00:46:00.973Z" }));
+  text("buildInfo", formatBuildInfo({ version: "0.1.0", revision: "c224941", builtAt: "2026-09-30T17:01:08.040Z" }));
   var adapter = navigator.bluetooth;
   var diagnostics = new Diagnostics();
   var rawCapture = new RawCapture();
@@ -1709,6 +1776,11 @@ ASCII: ${ascii}`);
       record(event.message);
       if (event.severity === "error") showErrorModal(event.message);
     }
+    if (event.type === "admin-auth-state") {
+      adminMessage = event.message;
+      record(event.message);
+      if (event.severity === "error") showErrorModal(event.message);
+    }
     if (event.type === "reservation") {
       reservationResult = event.message;
       record(event.message);
@@ -1768,16 +1840,16 @@ ASCII: ${ascii}`);
     text("experimentQueryResult", experimentQueryResult || "\u5C1A\u672A\u53D1\u8D77 APP \u67E5\u8BE2\u3002");
     text("experimentIdentityStatus", client?.experimentalIdentityReady ? "\u5DF2\u4ECE\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u53D6\u5F97\u67E5\u8BE2\u5B57\u6BB5\u3002" : "\u7B49\u5F85\u5F53\u524D\u8BBE\u5907 54 \u901A\u77E5\u3002");
     for (const id of ["experimentQueryVin", "experimentQueryNetwork"])
-      el(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending;
+      el(id).disabled = !client?.experimentalIdentityReady || busy || !!client.experimentalPending || !!client.adminPending;
     const loginProgress = el("liveLoginProgress");
     loginProgress.hidden = !device || phase !== "authenticating" || !!client?.authorized;
     if (!loginProgress.hidden) text("liveLoginProgress", client?.automaticLoginPending ? "\u6B63\u5728\u81EA\u52A8\u767B\u5F55\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026" : "\u6B63\u5728\u9A8C\u8BC1\u9A8C\u8BC1\u7801\uFF0C\u7B49\u5F85\u8BBE\u5907\u786E\u8BA4\u2026");
     el("liveAuthBox").hidden = !device || phase !== "password" || !!client?.authorized;
     el("liveAuthorize").disabled = !client?.currentProtocol || phase === "authenticating" || busy;
-    el("liveStart").disabled = !client?.authorized || !fresh || busy;
-    el("liveStop").disabled = !client?.authorized || !fresh || busy || status2?.state !== "4";
-    el("liveUnlock").disabled = !client?.authorized || !fresh || busy || !status2 || status2.state === "4" || status2.mode === "3" || status2.lock === "0";
-    el("liveRefresh").disabled = !client?.authorized || busy;
+    el("liveStart").disabled = !client?.authorized || !fresh || busy || !!client.adminPending;
+    el("liveStop").disabled = !client?.authorized || !fresh || busy || !!client.adminPending || status2?.state !== "4";
+    el("liveUnlock").disabled = !client?.authorized || !fresh || busy || !!client.adminPending || !status2 || status2.state === "4" || status2.mode === "3" || status2.lock === "0";
+    el("liveRefresh").disabled = !client?.authorized || busy || !!client.adminPending;
     el("liveDisconnect").disabled = !device;
     el("liveChoose").disabled = !supported || busy;
     el("liveRestore").disabled = !supported || !client?.rememberedName || busy || !!device;
@@ -1785,7 +1857,7 @@ ASCII: ${ascii}`);
     const adminPanel = el("adminPanel");
     adminPanel.hidden = !client?.authorized;
     const adminReady = !!client?.administratorAuthorized;
-    el("adminAuthBox").hidden = adminReady;
+    el("adminAuthBox").hidden = adminReady || !!client?.automaticAdministratorLoginPending;
     el("adminControls").hidden = !adminReady;
     el("adminLogin").disabled = !client?.authorized || !!client.adminPending || busy;
     for (const id of ["adminPlugOn", "adminPlugOff", "adminChangeBluetoothPassword", "adminChangePassword"])
@@ -1799,9 +1871,9 @@ ASCII: ${ascii}`);
     if (document.activeElement !== authMode) authMode.value = client?.manualBluetoothLogin ? "manual" : "auto";
     text("adminState", adminMessage || (adminReady ? "\u7BA1\u7406\u5458\u5DF2\u9A8C\u8BC1\uFF1B\u7BA1\u7406\u64CD\u4F5C\u4ECD\u9700\u8BBE\u5907\u56DE\u6267\u3002" : "\u7BA1\u7406\u5458\u6743\u9650\u672A\u9A8C\u8BC1\u3002"));
     const reservationBlocked = status2 ? reservationBlockReason(status2) : null;
-    el("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending;
+    el("reserveSubmit").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || !!client?.adminPending;
     text("reserveSubmit", client?.canCancelReservation ? "\u4FEE\u6539\u9884\u7EA6" : "\u63D0\u4EA4\u9884\u7EA6");
-    el("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || status2?.state === "4" || !client?.canCancelReservation;
+    el("reserveCancel").disabled = !client?.authorized || !fresh || busy || !!client?.reservationPending || !!client?.adminPending || status2?.state === "4" || !client?.canCancelReservation;
     const reserveInput = el("reserveStart");
     if (reservationStartAutomatic && reserveInput.value !== localMinute(nextMidnight())) resetReservationStart();
     reserveInput.min = localMinute(/* @__PURE__ */ new Date());
@@ -2039,8 +2111,8 @@ ASCII: ${ascii}`);
     adminMessage = `\u6B63\u5728${label}\uFF0C\u7B49\u5F85\u8BBE\u5907\u56DE\u6267\u2026`;
     render();
     try {
-      await client.admin(action, value);
-      adminMessage = action === "pair" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u5F00\u542F\u914D\u5BF9\u7A97\u53E3\uFF1B\u8BF7\u5728 iOS \u7CFB\u7EDF\u5B8C\u6210\u914D\u5BF9\u5E76\u73B0\u573A\u6838\u5BF9\u662F\u5426\u8FDB\u5165\u65E0\u611F\u6A21\u5F0F\u3002" : action === "bluetooth-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u65E7\u9A8C\u8BC1\u7801\u7F13\u5B58\u5DF2\u5220\u9664\uFF0C\u91CD\u65B0\u8FDE\u63A5\u65F6\u987B\u8F93\u5165\u65B0\u9A8C\u8BC1\u7801\u5E76\u7531\u8BBE\u5907\u9A8C\u8BC1\u3002" : action === "admin-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u539F\u7BA1\u7406\u5458\u6743\u9650\u5DF2\u5931\u6548\uFF0C\u8BF7\u7528\u65B0\u9A8C\u8BC1\u7801\u91CD\u65B0\u9A8C\u8BC1\u3002" : action === "mute-on" || action === "mute-off" ? "\u8BBE\u5907\u5DF2\u63A5\u53D7\u9759\u97F3\u64CD\u4F5C\uFF1B\u72B6\u6001\u62A5\u6587\u4E0D\u542B\u9759\u97F3\u6807\u5FD7\uFF0C\u8BF7\u73B0\u573A\u6838\u5BF9\u3002" : action === "admin-auth" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u7BA1\u7406\u5458\u6743\u9650\u3002" : `\u8BBE\u5907\u5DF2\u63A5\u53D7${label}\uFF1B\u8BF7\u7B49\u540E\u7EED\u8BBE\u5907\u72B6\u6001\u6838\u5BF9\u3002`;
+      await client.admin(action, value, el("rememberAdminPassword").checked);
+      adminMessage = action === "pair" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u5F00\u542F\u914D\u5BF9\u7A97\u53E3\uFF1B\u8BF7\u5728 iOS \u7CFB\u7EDF\u5B8C\u6210\u914D\u5BF9\u5E76\u73B0\u573A\u6838\u5BF9\u662F\u5426\u8FDB\u5165\u65E0\u611F\u6A21\u5F0F\u3002" : action === "bluetooth-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u65E7\u9A8C\u8BC1\u7801\u7F13\u5B58\u5DF2\u5220\u9664\uFF0C\u91CD\u65B0\u8FDE\u63A5\u65F6\u987B\u8F93\u5165\u65B0\u9A8C\u8BC1\u7801\u5E76\u7531\u8BBE\u5907\u9A8C\u8BC1\u3002" : action === "admin-password" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u4FEE\u6539\uFF1B\u65E7\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\u7F13\u5B58\u5DF2\u5220\u9664\uFF0C\u8BF7\u7528\u65B0\u9A8C\u8BC1\u7801\u91CD\u65B0\u9A8C\u8BC1\u3002" : action === "mute-on" || action === "mute-off" ? "\u8BBE\u5907\u5DF2\u63A5\u53D7\u9759\u97F3\u64CD\u4F5C\uFF1B\u72B6\u6001\u62A5\u6587\u4E0D\u542B\u9759\u97F3\u6807\u5FD7\uFF0C\u8BF7\u73B0\u573A\u6838\u5BF9\u3002" : action === "admin-auth" ? "\u8BBE\u5907\u5DF2\u786E\u8BA4\u7BA1\u7406\u5458\u6743\u9650\u3002" : `\u8BBE\u5907\u5DF2\u63A5\u53D7${label}\uFF1B\u8BF7\u7B49\u540E\u7EED\u8BBE\u5907\u72B6\u6001\u6838\u5BF9\u3002`;
       record(adminMessage);
     } catch (error) {
       adminMessage = `${label}\u672A\u786E\u8BA4`;
@@ -2085,10 +2157,11 @@ ${faultAdvice(status2)}
     render();
   });
   el("liveForgetPassword").addEventListener("click", () => {
-    if (!window.confirm("\u5220\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u84DD\u7259\u9A8C\u8BC1\u7801\uFF1F\u4E0B\u6B21\u9700\u91CD\u65B0\u8F93\u5165\u3002")) return;
+    if (!window.confirm("\u5220\u9664\u672C\u7F51\u7AD9\u4FDD\u5B58\u7684\u84DD\u7259\u548C\u7BA1\u7406\u5458\u9A8C\u8BC1\u7801\uFF1F\u4E0B\u6B21\u9700\u91CD\u65B0\u8F93\u5165\u3002")) return;
     client?.forgetPassword();
+    client?.forgetAdminPassword();
     diagnostics.add("password-forgotten");
-    record("\u5DF2\u5220\u9664\u4FDD\u5B58\u7684\u9A8C\u8BC1\u7801\u3002");
+    record("\u5DF2\u5220\u9664\u4FDD\u5B58\u7684\u4E24\u7C7B\u9A8C\u8BC1\u7801\u3002");
     render();
   });
   el("liveForgetDevice").addEventListener("click", () => {
@@ -2193,8 +2266,8 @@ ${faultAdvice(status2)}
     ...environment(),
     schema: 4,
     buildVersion: "0.1.0",
-    buildRevision: "abe7877",
-    buildTimeLocal: formatLocalBuildTime("2026-09-28T00:46:00.973Z")
+    buildRevision: "c224941",
+    buildTimeLocal: formatLocalBuildTime("2026-09-30T17:01:08.040Z")
   });
   refreshDiagnostics(true);
   refreshRawCapture(true);

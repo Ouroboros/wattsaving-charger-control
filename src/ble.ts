@@ -24,7 +24,7 @@ export interface BleAdapter {
   requestDevice(options: { acceptAllDevices: true; optionalServices: string[] }): Promise<BleDevice>;
   getDevices?(): Promise<BleDevice[]>;
 }
-interface StoredDevice { name: string; password?: string; protocol?: Version; }
+interface StoredDevice { name: string; password?: string; adminPassword?: string; protocol?: Version; }
 interface Vault { lastId: string; devices: Record<string, StoredDevice>; }
 type Phase = "offline" | "connecting" | "detecting" | "password" | "authenticating" | "ready";
 export type ChargerEvent =
@@ -33,6 +33,7 @@ export type ChargerEvent =
   | { type: "protocol"; version: Version; source: string }
   | { type: "status"; status: DeviceStatus }
   | { type: "experimental-identity" }
+  | { type: "admin-auth-state"; message: string; severity?: "error" }
   | { type: "reservation"; action: ReservationAction; message: string }
   | { type: "auth-needed"; message: string };
 const KEY = "wattsaving-ble-devices-v1";
@@ -124,6 +125,8 @@ export class ChargerClient {
   private sniffTimer: ReturnType<typeof setTimeout> | null = null;
   private autoLoginTried = false;
   private autoLoginInProgress = false;
+  private autoAdminLoginTried = false;
+  private autoAdminLoginInProgress = false;
   private protocol: Version | null = null;
   private phase: Phase = "offline";
   private connectionStage = "offline";
@@ -138,7 +141,7 @@ export class ChargerClient {
   private pendingAuth: { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password: string; remember: boolean } | null = null;
   private pendingControl: { action: ControlAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private pendingReservation: { action: ReservationAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
-  private pendingAdmin: { action: AdminAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
+  private pendingAdmin: { action: AdminAction; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; password?: string; remember: boolean } | null = null;
   private pendingQuery: { query: ExperimentalQuery; resolve: (result: "accepted" | "rejected" | "received") => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   private binaryIdentity: { pile: string; gun: string; at: number; epoch: number } | null = null;
   private adminVerified = false;
@@ -157,6 +160,7 @@ export class ChargerClient {
   get currentStatus(): DeviceStatus | null { return this.latest; }
   get authorized(): boolean { return this.phase === "ready" && !!this.server?.connected; }
   get automaticLoginPending(): boolean { return this.autoLoginInProgress && this.phase === "authenticating"; }
+  get automaticAdministratorLoginPending(): boolean { return this.autoAdminLoginInProgress; }
   get reservationPending(): boolean { return !!this.pendingReservation; }
   get adminPending(): boolean { return !!this.pendingAdmin; }
   get experimentalPending(): boolean { return !!this.pendingQuery; }
@@ -217,9 +221,16 @@ export class ChargerClient {
     this.diagnose("device-remembered", { known: !!previous, persisted });
   }
   forgetPassword(): void {
+    if (this.pendingAuth) this.pendingAuth.remember = false;
     const id = this.device?.id ?? this.loadVault().lastId;
     const vault = this.loadVault();
     if (vault.devices[id]) { delete vault.devices[id].password; this.storeVault(vault); }
+  }
+  forgetAdminPassword(): void {
+    if (this.pendingAdmin?.action === "admin-auth") this.pendingAdmin.remember = false;
+    const id = this.device?.id ?? this.loadVault().lastId;
+    const vault = this.loadVault();
+    if (vault.devices[id]) { delete vault.devices[id].adminPassword; this.storeVault(vault); }
   }
   forgetDevice(): void {
     this.disconnect("forget-device");
@@ -227,7 +238,7 @@ export class ChargerClient {
     this.recentDevice = null;
     this.storeVault({ lastId: "", devices: {} });
     try { localStorage.removeItem(AUTH_MODE_KEY); } catch { /* 本地存储可能不可用 */ }
-    this.emit({ type: "notice", message: "已清除该网站保存的设备和蓝牙验证码。" });
+    this.emit({ type: "notice", message: "已清除该网站保存的设备和两类验证码。" });
   }
   private setPhase(phase: Phase, message: string): void { this.phase = phase; this.emit({ type: "phase", phase, message }); }
   async restore(): Promise<boolean> {
@@ -544,7 +555,30 @@ export class ChargerClient {
       void this.write(frame, action).catch(error => this.rejectControl(new Error(`发送指令失败：${message(error)}`), "write-error"));
     });
   }
-  admin(action: AdminAction, password?: string): Promise<void> {
+  private async autoAuthorizeAdministrator(): Promise<void> {
+    if (!this.authorized || !this.device || this.autoAdminLoginTried || this.adminVerified) return;
+    const saved = this.loadVault().devices[this.device.id]?.adminPassword;
+    if (!saved || !/^\d{5}$/.test(saved)) return;
+    const epoch = this.epoch;
+    this.autoAdminLoginTried = true;
+    this.autoAdminLoginInProgress = true;
+    this.diagnose("admin-cached-start");
+    try {
+      const reply = this.admin("admin-auth", saved, true);
+      this.emit({ type: "admin-auth-state", message: "正在自动验证管理员，等待设备回执…" });
+      await reply;
+      if (epoch !== this.epoch) return;
+      this.autoAdminLoginInProgress = false;
+      this.diagnose("admin-cached-confirmed");
+      this.emit({ type: "admin-auth-state", message: "管理员自动授权已通过。" });
+    } catch (error) {
+      if (epoch !== this.epoch) return;
+      this.autoAdminLoginInProgress = false;
+      this.diagnose("admin-cached-failed", diagnosticError(error), "warn");
+      this.emit({ type: "admin-auth-state", message: "管理员自动授权未通过，请手动输入管理员验证码。", severity: "error" });
+    }
+  }
+  admin(action: AdminAction, password?: string, remember = true): Promise<void> {
     if (!this.authorized || !this.protocol || !this.device) throw new Error("请先连接并通过设备蓝牙授权");
     if (action !== "admin-auth" && !this.adminVerified) throw new Error("请先使用独立管理员验证码取得设备确认");
     if (this.pendingAuth || this.pendingControl || this.pendingReservation || this.pendingAdmin || this.experimentalPending) throw new Error("上一条设备操作尚未确认");
@@ -554,11 +588,14 @@ export class ChargerClient {
     if (action === "pair" && (status?.mode === "3" || status?.selfStartFlag === "2")) throw new Error("请先取消预约或即插即充模式");
     if (action === "pair" && !this.pairingNotifier) throw new Error("未发现原小程序配对所需的 FF03 通知特征；不能启动无感配对");
     const frame = adminCommand(this.protocol, action, password);
-    this.diagnose("admin-request", { action, version: this.protocol });
+    if (action === "admin-auth") this.autoAdminLoginTried = true;
+    this.diagnose("admin-request", { action, version: this.protocol, remember: action === "admin-auth" && remember });
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => this.rejectAdmin(new Error("设备管理回执超时，结果未知，请核对状态后再操作"), "timeout"), 10000);
-      this.pendingAdmin = { action, resolve, reject, timer };
-      void this.write(frame, action).catch(error => this.rejectAdmin(new Error(`发送管理指令失败：${message(error)}`), "write-error"));
+      const pending = this.pendingAdmin = { action, resolve, reject, timer, remember, ...(action === "admin-auth" ? { password } : {}) };
+      void this.write(frame, action).catch(error => {
+        if (this.pendingAdmin === pending) this.rejectAdmin(new Error(`发送管理指令失败：${message(error)}`), "write-error");
+      });
     });
   }
   private rejectAdmin(error: Error, reason = "unknown"): void {
@@ -664,12 +701,18 @@ export class ChargerClient {
       const vault = this.loadVault();
       const device = this.device!;
       vault.lastId = device.id;
-      vault.devices[device.id] = { name: device.name || "未命名设备", protocol: this.protocol, ...(pending.remember ? { password: pending.password } : {}) };
+      vault.devices[device.id] = { ...vault.devices[device.id], name: device.name || "未命名设备", protocol: this.protocol,
+        ...(pending.remember ? { password: pending.password } : {}) };
+      if (!pending.remember) delete vault.devices[device.id].password;
       const persisted = this.storeVault(vault);
       this.diagnose("auth-saved", { remembered: pending.remember, persisted, version: this.protocol });
       this.setPhase("ready", "设备确认授权成功；可以读取状态并控制。" );
       pending.resolve();
-      void this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}`, severity: "error" }));
+      const epoch = this.epoch;
+      void this.autoAuthorizeAdministrator().then(() => {
+        if (epoch !== this.epoch || !this.authorized) return;
+        return this.refresh().catch(error => this.emit({ type: "notice", message: `同步时钟/获取状态失败：${message(error)}`, severity: "error" }));
+      });
       return;
     }
     if (frame.type === "admin") {
@@ -689,9 +732,22 @@ export class ChargerClient {
         return;
       }
       this.pendingAdmin = null; clearTimeout(pending.timer);
-      if (!frame.ok) { pending.reject(new Error("设备拒绝管理员验证或设置")); return; }
-      if (pending.action === "admin-auth") this.adminVerified = true;
-      if (pending.action === "admin-password") this.adminVerified = false;
+      if (!frame.ok) {
+        if (pending.action === "admin-auth") this.forgetAdminPassword();
+        pending.reject(new Error("设备拒绝管理员验证或设置")); return;
+      }
+      if (pending.action === "admin-auth") {
+        this.adminVerified = true;
+        const vault = this.loadVault();
+        const saved = vault.devices[this.device!.id];
+        if (saved) {
+          if (pending.remember && pending.password) saved.adminPassword = pending.password;
+          else delete saved.adminPassword;
+          const persisted = this.storeVault(vault);
+          this.diagnose("admin-auth-saved", { remembered: pending.remember, persisted });
+        }
+      }
+      if (pending.action === "admin-password") { this.adminVerified = false; this.forgetAdminPassword(); }
       if (pending.action === "bluetooth-password") this.forgetPassword();
       pending.resolve();
       return;
@@ -781,6 +837,7 @@ export class ChargerClient {
       pendingReservation: !!this.pendingReservation, pendingAdmin: !!this.pendingAdmin };
     this.epoch++;
     this.autoLoginInProgress = false;
+    this.autoAdminLoginTried = false; this.autoAdminLoginInProgress = false;
     if (this.sniffTimer) clearTimeout(this.sniffTimer);
     this.sniffTimer = null;
     this.rejectAuth(new Error("蓝牙连接已断开"), "disconnect");
